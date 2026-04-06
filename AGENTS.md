@@ -1,8 +1,9 @@
 # AGENTS.md
 
-- Use the root Pixi environment for repo commands, including DVC: `pixi run ...`
-  for defined tasks and `pixi exec ...` for ad hoc commands such as
-  `pixi exec dvc repro deepplanning_data`.
+- Use the root Pixi environment for repo commands, including DVC:
+  `pixi run ...`.
+- Prefer Pixi tasks over ad hoc invocation. Benchmark entrypoint should be run
+  as `pixi run deepplanning-benchmark -- ...`.
 - This repo is mostly a wrapper around the benchmark submodule. The code that
   actually runs DeepPlanning lives in
   `external/qwen-agent/benchmark/deepplanning/`; root currently only adds
@@ -20,22 +21,19 @@
   benchmark databases under `data/deepplanning/` so the submodule stays clean.
 - The benchmark entrypoint for this repo is
   `scripts/run_deepplanning_benchmark.py`. Run it from the repo root with Pixi,
-  e.g. `pixi run run-deepplanning` or
-  `pixi exec python scripts/run_deepplanning_benchmark.py`.
-- Keep `models_config.json` and `.env` at the repo root, not inside
-  `external/qwen-agent/`. The root wrappers load them and patch the vendored
-  benchmark imports at runtime.
-- Model definitions are name-based. Shopping and travel both read configs from
-  the repo-root `models_config.json`.
+  e.g. `pixi run deepplanning-benchmark -- --domains="travel shopping"`.
+- Keep `.env` at the repo root, not inside `external/qwen-agent/`. Root wrapper
+  model definitions live in Hydra config under `conf/deepplanning/models.yaml`
+  and are patched into vendored benchmark imports at runtime.
 
 - Focused benchmark runs use the root wrappers so data and outputs stay outside
   the submodule:
 - Shopping only:
-  `pixi exec python scripts/run_deepplanning_shopping.py --models="qwen-plus"`
+  `pixi run deepplanning-benchmark -- --domains="shopping" --models="qwen-plus"`
 - Travel only:
-  `pixi exec python scripts/run_deepplanning_travel.py --models="qwen-plus"`
+  `pixi run deepplanning-benchmark -- --domains="travel" --models="qwen-plus"`
 - Unified runner:
-  `pixi exec python scripts/run_deepplanning_benchmark.py --domains="travel shopping" --models="qwen-plus"`
+  `pixi run deepplanning-benchmark -- --domains="travel shopping" --models="qwen-plus"`
 - Travel control knobs map to wrapper args: `--language`, `--start_from`, and
   `--output_root`.
 

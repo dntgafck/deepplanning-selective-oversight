@@ -1,5 +1,6 @@
 models: qwen-plus
 levels: 1 2 3
+sample_ids: ""
 workers: 50
 max_llm_calls: 400
 output_root: outputs/deepplanning/shopping

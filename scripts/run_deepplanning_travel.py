@@ -8,12 +8,17 @@ from deepplanning_common import (
     BENCHMARK_ROOT,
     DATA_ROOT,
     OUTPUT_ROOT,
+    clear_imported_modules,
     compose_config,
     ensure_directory,
+    filter_samples_by_ids,
     load_dotenv,
+    load_json_file,
     load_model_config,
+    parse_id_list,
     parse_space_separated,
     resolve_repo_path,
+    write_json_file,
 )
 
 TRAVEL_ROOT = BENCHMARK_ROOT / "travelplanning"
@@ -22,6 +27,7 @@ TRAVEL_OUTPUT_ROOT = OUTPUT_ROOT / "travel"
 
 
 def import_modules() -> tuple[object, object, object]:
+    clear_imported_modules(["agent", "evaluation", "prompts", "call_llm", "run"])
     sys.path.insert(0, str(TRAVEL_ROOT))
 
     import agent.call_llm as travel_call_llm
@@ -30,12 +36,35 @@ def import_modules() -> tuple[object, object, object]:
     import run as travel_run
 
     travel_call_llm.load_model_config = load_model_config
+    convert_report.load_model_config = load_model_config
     return convert_report, eval_converted, travel_run
+
+
+def prepare_test_data(
+    language: str, output_dir: Path, sample_ids: list[str] | None
+) -> Path:
+    source_test_data_path = (
+        TRAVEL_ROOT / "data" / f"travelplanning_query_{language}.json"
+    )
+    if sample_ids is None:
+        return source_test_data_path
+
+    all_samples = load_json_file(source_test_data_path)
+    selected_samples = filter_samples_by_ids(all_samples, sample_ids)
+    if not selected_samples:
+        raise ValueError(f"No travel samples matched ids: {', '.join(sample_ids)}")
+
+    filtered_test_data_path = (
+        output_dir / f"travelplanning_query_{language}_subset.json"
+    )
+    write_json_file(filtered_test_data_path, selected_samples)
+    return filtered_test_data_path
 
 
 def run_language(
     model: str,
     language: str,
+    sample_ids: list[str] | None,
     cfg: object,
     convert_report: object,
     eval_converted: object,
@@ -44,7 +73,7 @@ def run_language(
     database_dir = TRAVEL_DATA_ROOT / f"database_{language}"
     if not database_dir.exists():
         raise FileNotFoundError(
-            f"Travel data missing at {database_dir}. Run `pixi exec dvc repro deepplanning_data` first."
+            f"Travel data missing at {database_dir}. Ensure DVC data bootstrap is present under data/deepplanning/."
         )
 
     output_base = ensure_directory(resolve_repo_path(cfg.output_root))
@@ -54,7 +83,7 @@ def run_language(
     ensure_directory(output_dir / "converted_plans")
     ensure_directory(output_dir / "evaluation")
 
-    test_data_path = TRAVEL_ROOT / "data" / f"travelplanning_query_{language}.json"
+    test_data_path = prepare_test_data(language, output_dir, sample_ids)
     tool_schema_path = TRAVEL_ROOT / "tools" / f"tool_schema_{language}.json"
 
     print("\n🚀 Travel benchmark")
@@ -62,6 +91,8 @@ def run_language(
     print(f"   Language: {language}")
     print(f"   Database: {database_dir}")
     print(f"   Output: {output_dir}")
+    if sample_ids is not None:
+        print(f"   Sample IDs: {', '.join(sample_ids)}")
 
     if cfg.start_from == "inference":
         inference_results = travel_run.run_agent_inference(
@@ -108,6 +139,7 @@ def main() -> None:
 def run(
     models: str | None = None,
     language: str | None = None,
+    sample_ids: str | None = None,
     workers: int | None = None,
     max_llm_calls: int | None = None,
     start_from: str | None = None,
@@ -123,6 +155,7 @@ def run(
         {
             "models": models,
             "language": language,
+            "sample_ids": sample_ids,
             "workers": workers,
             "max_llm_calls": max_llm_calls,
             "start_from": start_from,
@@ -134,13 +167,20 @@ def run(
 
     model_names = parse_space_separated(cfg.models, ["qwen-plus"])
     language_value = cfg.language or ""
+    selected_sample_ids = parse_id_list(cfg.sample_ids)
 
     languages = [language_value] if language_value else ["zh", "en"]
     for model in model_names:
         load_model_config(model)
         for language in languages:
             run_language(
-                model, language, cfg, convert_report, eval_converted, travel_run
+                model,
+                language,
+                selected_sample_ids,
+                cfg,
+                convert_report,
+                eval_converted,
+                travel_run,
             )
 
 

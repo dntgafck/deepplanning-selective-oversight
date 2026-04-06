@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 import sys
 import time
@@ -11,13 +10,18 @@ from deepplanning_common import (
     BENCHMARK_ROOT,
     DATA_ROOT,
     OUTPUT_ROOT,
+    clear_imported_modules,
     compose_config,
     ensure_directory,
+    filter_samples_by_ids,
     load_dotenv,
+    load_json_file,
     load_model_config,
+    parse_id_list,
     parse_int_list,
     parse_space_separated,
     resolve_repo_path,
+    write_json_file,
 )
 
 SHOPPING_ROOT = BENCHMARK_ROOT / "shoppingplanning"
@@ -26,6 +30,7 @@ SHOPPING_OUTPUT_ROOT = OUTPUT_ROOT / "shopping"
 
 
 def import_modules() -> tuple[object, object, object, object, object]:
+    clear_imported_modules(["agent", "evaluation", "prompts", "call_llm"])
     sys.path.insert(0, str(SHOPPING_ROOT))
 
     import agent.call_llm as shopping_call_llm
@@ -74,10 +79,38 @@ def write_statistics(
         raise RuntimeError(f"Failed to calculate shopping statistics for model {model}")
 
     output_file = result_report_root / f"{model}_statistics.json"
-    output_file.write_text(
-        json.dumps(statistics, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_json_file(output_file, statistics)
     print(f"✅ Shopping statistics saved to: {output_file}")
+
+
+def prepare_run_inputs(
+    level: int,
+    source_database_dir: Path,
+    run_database_dir: Path,
+    sample_ids: list[str] | None,
+) -> Path:
+    source_test_data_path = SHOPPING_ROOT / "data" / f"level_{level}_query_meta.json"
+    if sample_ids is None:
+        shutil.copytree(source_database_dir, run_database_dir)
+        return source_test_data_path
+
+    all_samples = load_json_file(source_test_data_path)
+    selected_samples = filter_samples_by_ids(all_samples, sample_ids)
+    if not selected_samples:
+        raise ValueError(f"No shopping samples matched ids: {', '.join(sample_ids)}")
+
+    ensure_directory(run_database_dir)
+    for sample in selected_samples:
+        case_dir = source_database_dir / f"case_{sample['id']}"
+        if not case_dir.exists():
+            raise FileNotFoundError(f"Shopping case directory missing: {case_dir}")
+        shutil.copytree(case_dir, run_database_dir / case_dir.name)
+
+    filtered_test_data_path = (
+        run_database_dir.parent / f"{run_database_dir.name}_query_meta.json"
+    )
+    write_json_file(filtered_test_data_path, selected_samples)
+    return filtered_test_data_path
 
 
 def main() -> None:
@@ -87,6 +120,7 @@ def main() -> None:
 def run(
     models: str | None = None,
     levels: str | None = None,
+    sample_ids: str | None = None,
     workers: int | None = None,
     max_llm_calls: int | None = None,
     output_root: str | None = None,
@@ -101,6 +135,7 @@ def run(
         {
             "models": models,
             "levels": levels,
+            "sample_ids": sample_ids,
             "workers": workers,
             "max_llm_calls": max_llm_calls,
             "output_root": output_root,
@@ -109,9 +144,9 @@ def run(
 
     model_names = parse_space_separated(cfg.models, ["qwen-plus"])
     level_numbers = parse_int_list(cfg.levels, [1, 2, 3])
+    selected_sample_ids = parse_id_list(cfg.sample_ids)
     output_root_path = resolve_repo_path(cfg.output_root)
 
-    test_data_dir = SHOPPING_ROOT / "data"
     tool_schema_path = SHOPPING_ROOT / "tools" / "shopping_tool_schema.json"
     database_output_root = ensure_directory(output_root_path / "database_infered")
     result_report_root = ensure_directory(output_root_path / "result_report")
@@ -123,7 +158,7 @@ def run(
             source_database_dir = SHOPPING_DATA_ROOT / f"database_level{level}"
             if not source_database_dir.exists():
                 raise FileNotFoundError(
-                    f"Shopping data missing at {source_database_dir}. Run `pixi exec dvc repro deepplanning_data` first."
+                    f"Shopping data missing at {source_database_dir}. Ensure DVC data bootstrap is present under data/deepplanning/."
                 )
 
             timestamp = time.strftime("%Y%m%d%H%M")
@@ -132,17 +167,24 @@ def run(
 
             if run_database_dir.exists():
                 shutil.rmtree(run_database_dir)
-            shutil.copytree(source_database_dir, run_database_dir)
+            test_data_path = prepare_run_inputs(
+                level=level,
+                source_database_dir=source_database_dir,
+                run_database_dir=run_database_dir,
+                sample_ids=selected_sample_ids,
+            )
 
             print("\n🚀 Shopping benchmark")
             print(f"   Model: {model}")
             print(f"   Level: {level}")
             print(f"   Database: {run_database_dir}")
+            if selected_sample_ids is not None:
+                print(f"   Sample IDs: {', '.join(selected_sample_ids)}")
 
             system_prompt = getattr(prompt_lib, f"SYSTEM_PROMPT_level{level}")
             results = shopping_agent.run_agent_inference(
                 model=model,
-                test_data_path=test_data_dir / f"level_{level}_query_meta.json",
+                test_data_path=test_data_path,
                 database_dir=run_database_dir,
                 tool_schema_path=tool_schema_path,
                 system_prompt=system_prompt,

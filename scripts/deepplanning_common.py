@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
@@ -13,7 +15,7 @@ BENCHMARK_ROOT = REPO_ROOT / "external" / "qwen-agent" / "benchmark" / "deepplan
 DATA_ROOT = REPO_ROOT / "data" / "deepplanning"
 OUTPUT_ROOT = REPO_ROOT / "outputs" / "deepplanning"
 CONFIG_ROOT = REPO_ROOT / "conf" / "deepplanning"
-MODELS_CONFIG_PATH = REPO_ROOT / "models_config.json"
+MODELS_CONFIG_PATH = CONFIG_ROOT / "models.yaml"
 DOTENV_PATH = REPO_ROOT / ".env"
 
 
@@ -38,12 +40,11 @@ def load_model_config(
 ) -> dict[str, Any]:
     if not config_path.exists():
         raise FileNotFoundError(
-            f"models_config.json not found at {config_path}. "
-            "Keep benchmark config at the repo root to avoid modifying the submodule."
+            f"Hydra model config not found at {config_path}. "
+            "Keep benchmark model definitions under conf/deepplanning/."
         )
 
-    with config_path.open("r", encoding="utf-8") as fh:
-        config = json.load(fh)
+    config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
 
     models = config.get("models", {})
     if model_name not in models:
@@ -81,14 +82,62 @@ def parse_space_separated(
 
 
 def parse_int_list(
-    value: str | list[int] | list[str] | None, default: list[int]
+    value: int | str | list[int] | list[str] | None, default: list[int]
 ) -> list[int]:
     if value is None:
         return default
+    if isinstance(value, int):
+        return [value]
     if isinstance(value, list):
         return [int(item) for item in value] or default
     items = [item for item in value.split() if item]
     return [int(item) for item in items] or default
+
+
+def parse_id_list(
+    value: int | str | list[int] | list[str] | None,
+) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return [str(value)]
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items or None
+
+    items = [item for item in re.split(r"[\s,]+", value.strip()) if item]
+    return items or None
+
+
+def filter_samples_by_ids(
+    samples: list[dict[str, Any]], sample_ids: Iterable[str] | None
+) -> list[dict[str, Any]]:
+    if sample_ids is None:
+        return samples
+
+    sample_id_set = {str(sample_id) for sample_id in sample_ids}
+    return [sample for sample in samples if str(sample.get("id")) in sample_id_set]
+
+
+def load_json_file(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def write_json_file(path: Path, payload: Any) -> None:
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def clear_imported_modules(prefixes: Iterable[str]) -> None:
+    for module_name in list(sys.modules):
+        if any(
+            module_name == prefix or module_name.startswith(f"{prefix}.")
+            for prefix in prefixes
+        ):
+            sys.modules.pop(module_name, None)
 
 
 def resolve_repo_path(path: str | Path) -> Path:

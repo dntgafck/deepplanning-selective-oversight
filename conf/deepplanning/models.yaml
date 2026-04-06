@@ -1,0 +1,22 @@
+models:
+  qwen-plus:
+    model_name: qwen/qwen3-235b-a22b-2507
+    model_type: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    extra_body:
+      reasoning:
+        enabled: true
+    max_retries: 30
+    backoff: 1.5
+
+  openrouter-qwen36-free:
+    model_name: qwen/qwen3.6-plus:free
+    model_type: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    extra_body:
+      reasoning:
+        enabled: true
+    max_retries: 30
+    backoff: 1.5

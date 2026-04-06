@@ -8,7 +8,7 @@ version = "0.1.0"
 [tasks]
 lint-all = "pre-commit run --all-files"
 test = "pytest"
-run-deepplanning = "python scripts/run_deepplanning_benchmark.py"
+deepplanning-benchmark = "python scripts/run_deepplanning_benchmark.py"
 
 [dependencies]
 # Core runtime
@@ -26,6 +26,7 @@ scikit-learn = ">=1.5,<2"
 httpx = ">=0.27,<1"
 tenacity = ">=8.3,<10"
 huggingface-hub = ">=0.30,<1"
+openai = ">=1.54,<2"
 
 # CLI / config / workflow
 fire = "*"

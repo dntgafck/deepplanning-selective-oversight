@@ -4,7 +4,6 @@ import json
 import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import fire
@@ -133,10 +132,12 @@ def run(
     domains: str | None = None,
     models: str | None = None,
     shopping_levels: str | None = None,
+    shopping_sample_ids: str | None = None,
     workers: int | None = None,
     max_llm_calls: int | None = None,
     travel_language: str | None = None,
     travel_start_from: str | None = None,
+    travel_sample_ids: str | None = None,
 ) -> None:
     cfg = compose_config(
         "benchmark",
@@ -144,10 +145,12 @@ def run(
             "domains": domains,
             "models": models,
             "shopping_levels": shopping_levels,
+            "shopping_sample_ids": shopping_sample_ids,
             "workers": workers,
             "max_llm_calls": max_llm_calls,
             "travel_language": travel_language,
             "travel_start_from": travel_start_from,
+            "travel_sample_ids": travel_sample_ids,
         },
     )
 
@@ -156,16 +159,17 @@ def run(
     shopping_level_numbers = parse_int_list(cfg.shopping_levels, [1, 2, 3])
 
     if "shopping" in domain_names:
-        run_subprocess(
-            [
-                sys.executable,
-                "scripts/run_deepplanning_shopping.py",
-                f"--models={' '.join(model_names)}",
-                f"--levels={' '.join(str(level) for level in shopping_level_numbers)}",
-                f"--workers={cfg.workers}",
-                f"--max_llm_calls={cfg.max_llm_calls}",
-            ]
-        )
+        command = [
+            sys.executable,
+            "scripts/run_deepplanning_shopping.py",
+            f"--models={' '.join(model_names)}",
+            f"--levels={' '.join(str(level) for level in shopping_level_numbers)}",
+            f"--workers={cfg.workers}",
+            f"--max_llm_calls={cfg.max_llm_calls}",
+        ]
+        if cfg.shopping_sample_ids:
+            command.append(f"--sample_ids={cfg.shopping_sample_ids}")
+        run_subprocess(command)
 
     if "travel" in domain_names:
         command = [
@@ -178,6 +182,8 @@ def run(
         ]
         if cfg.travel_language:
             command.append(f"--language={cfg.travel_language}")
+        if cfg.travel_sample_ids:
+            command.append(f"--sample_ids={cfg.travel_sample_ids}")
         run_subprocess(command)
 
     for model in model_names:
