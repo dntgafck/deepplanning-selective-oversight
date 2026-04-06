@@ -1,0 +1,8 @@
+models: qwen-plus
+language: ""
+workers: 50
+max_llm_calls: 400
+start_from: inference
+output_root: outputs/deepplanning/travel
+verbose: false
+debug: false

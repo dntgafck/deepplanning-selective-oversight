@@ -1,0 +1,11 @@
+stages:
+  deepplanning_data:
+    cmd: python scripts/download_deepplanning_data.py
+    deps:
+      - scripts/download_deepplanning_data.py
+    outs:
+      - data/deepplanning/shopping/database_level1
+      - data/deepplanning/shopping/database_level2
+      - data/deepplanning/shopping/database_level3
+      - data/deepplanning/travel/database/database_zh
+      - data/deepplanning/travel/database/database_en

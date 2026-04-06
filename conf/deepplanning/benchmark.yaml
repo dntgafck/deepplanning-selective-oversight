@@ -1,0 +1,7 @@
+domains: travel shopping
+models: qwen-plus
+shopping_levels: 1 2 3
+workers: 50
+max_llm_calls: 400
+travel_language: ""
+travel_start_from: inference

@@ -137,6 +137,8 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+data/deepplanning/
+outputs/deepplanning/
 .venv
 env/
 venv/

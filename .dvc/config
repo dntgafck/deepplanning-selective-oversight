@@ -1,0 +1,11 @@
+[core]
+    remote = r2-public
+    autostage = true
+[cache]
+    type = "reflink,hardlink"
+['remote "r2"']
+    url = s3://deepplanning-selective-oversight/dvc-cache
+    endpointurl = https://6fe4e86315676774237ab53c6f9352b7.r2.cloudflarestorage.com
+    region = auto
+['remote "r2-public"']
+    url = https://dntgafck.com/dvc-cache

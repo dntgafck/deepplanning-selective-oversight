@@ -1,0 +1,15 @@
+[project]
+name = "selective-oversight"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+
+[[project.authors]]
+name = "Anton Ustinov"
+email = "ustinov.ant@gmail.com"
+
+[tool.black]
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+py_version = 311

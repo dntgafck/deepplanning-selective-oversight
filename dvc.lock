@@ -1,0 +1,35 @@
+schema: '2.0'
+stages:
+  deepplanning_data:
+    cmd: python scripts/download_deepplanning_data.py
+    deps:
+    - path: scripts/download_deepplanning_data.py
+      hash: md5
+      md5: 5f420c16a6bf4c9ade6e6979ee91acce
+      size: 3793
+    outs:
+    - path: data/deepplanning/shopping/database_level1
+      hash: md5
+      md5: 57e341c641f0efab3b72a8645ba40ede.dir
+      size: 9080884
+      nfiles: 202
+    - path: data/deepplanning/shopping/database_level2
+      hash: md5
+      md5: 6c703894ecaecfff5c484263c25ba0da.dir
+      size: 8826156
+      nfiles: 202
+    - path: data/deepplanning/shopping/database_level3
+      hash: md5
+      md5: 3a190aa4cd717b03a759d9d93251c4d4.dir
+      size: 3622047
+      nfiles: 80
+    - path: data/deepplanning/travel/database/database_en
+      hash: md5
+      md5: 79cd02f44a749d3531c72f45e587502f.dir
+      size: 390540513
+      nfiles: 819
+    - path: data/deepplanning/travel/database/database_zh
+      hash: md5
+      md5: cffcc7f893f354ee5250d6eba08914dd.dir
+      size: 389249735
+      nfiles: 846

@@ -1,0 +1,16 @@
+# ── HTTP / API ──────────────────────────────────────────────────────────────
+httpx>=0.27          # async-first HTTP client for OpenRouter calls
+tenacity>=8.3        # retry + exponential back-off with jitter
+
+# ── Numerics / stats ─────────────────────────────────────────────────────────
+numpy>=1.26          # arrays, bootstrap resampling
+scipy>=1.13          # Wilcoxon signed-rank, McNemar, t-test
+
+# ── Plotting ─────────────────────────────────────────────────────────────────
+matplotlib>=3.9      # cost–accuracy scatter, Pareto frontier, trigger distributions
+
+# ── NLP utility (loop detection) ─────────────────────────────────────────────
+scikit-learn>=1.5    # cosine_similarity for loop-detection trigger
+
+# ── Dev / testing ─────────────────────────────────────────────────────────────
+pytest>=8.2
