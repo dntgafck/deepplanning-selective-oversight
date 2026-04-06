@@ -1,0 +1,33 @@
+[workspace]
+authors = ["Anton Ustinov <ustinov.ant@gmail.com>"]
+channels = ["conda-forge"]
+name = "selective-oversight"
+platforms = ["osx-arm64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+lint-all = "pre-commit run --all-files"
+test = "pytest"
+
+[dependencies]
+# Core runtime
+python = "3.11.*"
+pip = "*"
+
+# Numerical / plotting
+numpy = ">=1.26,<3"
+scipy = ">=1.13,<2"
+matplotlib = ">=3.9,<4"
+scikit-learn = ">=1.5,<2"
+
+[pypi-dependencies]
+# Core libraries
+httpx = ">=0.27,<1"
+tenacity = ">=8.3,<10"
+
+# CLI / config / workflow
+fire = "*"
+hydra-core = ">=1.3.2,<2"
+dvc = { version = ">=3.65.0,<4", extras = ["s3"] }
+pytest = ">=8.2,<9"
+pre-commit = "*"
