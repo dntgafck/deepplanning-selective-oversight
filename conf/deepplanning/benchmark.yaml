@@ -1,5 +1,6 @@
 domains: travel shopping
 models: qwen-plus
+system: A
 shopping_levels: 1 2 3
 shopping_sample_ids: ""
 workers: 50

@@ -1,0 +1,8 @@
+domain: shopping
+models: qwen3-14b
+system: A
+parallel: 20
+max_llm_calls: 400
+shopping_levels: 1
+travel_language: en
+sample_ids: ""

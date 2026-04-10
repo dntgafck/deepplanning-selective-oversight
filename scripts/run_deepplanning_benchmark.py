@@ -7,14 +7,25 @@ from datetime import datetime
 from typing import Any
 
 import fire
-from deepplanning_common import (
-    OUTPUT_ROOT,
-    REPO_ROOT,
-    compose_config,
-    ensure_directory,
-    parse_int_list,
-    parse_space_separated,
-)
+
+try:
+    from deepplanning_common import (
+        OUTPUT_ROOT,
+        REPO_ROOT,
+        compose_config,
+        ensure_directory,
+        parse_int_list,
+        parse_space_separated,
+    )
+except ModuleNotFoundError:
+    from scripts.deepplanning_common import (
+        OUTPUT_ROOT,
+        REPO_ROOT,
+        compose_config,
+        ensure_directory,
+        parse_int_list,
+        parse_space_separated,
+    )
 
 
 def run_subprocess(command: list[str]) -> None:
@@ -131,6 +142,7 @@ def main() -> None:
 def run(
     domains: str | None = None,
     models: str | None = None,
+    system: str | None = None,
     shopping_levels: str | None = None,
     shopping_sample_ids: str | None = None,
     workers: int | None = None,
@@ -144,6 +156,7 @@ def run(
         {
             "domains": domains,
             "models": models,
+            "system": system,
             "shopping_levels": shopping_levels,
             "shopping_sample_ids": shopping_sample_ids,
             "workers": workers,
@@ -163,6 +176,7 @@ def run(
             sys.executable,
             "scripts/run_deepplanning_shopping.py",
             f"--models={' '.join(model_names)}",
+            f"--system={cfg.system}",
             f"--levels={' '.join(str(level) for level in shopping_level_numbers)}",
             f"--workers={cfg.workers}",
             f"--max_llm_calls={cfg.max_llm_calls}",
@@ -176,6 +190,7 @@ def run(
             sys.executable,
             "scripts/run_deepplanning_travel.py",
             f"--models={' '.join(model_names)}",
+            f"--system={cfg.system}",
             f"--workers={cfg.workers}",
             f"--max_llm_calls={cfg.max_llm_calls}",
             f"--start_from={cfg.travel_start_from}",

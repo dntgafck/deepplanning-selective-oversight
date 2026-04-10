@@ -6,47 +6,63 @@ import time
 from pathlib import Path
 
 import fire
-from deepplanning_common import (
-    BENCHMARK_ROOT,
-    DATA_ROOT,
-    OUTPUT_ROOT,
-    clear_imported_modules,
-    compose_config,
-    ensure_directory,
-    filter_samples_by_ids,
-    load_dotenv,
-    load_json_file,
-    load_model_config,
-    parse_id_list,
-    parse_int_list,
-    parse_space_separated,
-    resolve_repo_path,
-    write_json_file,
-)
+
+try:
+    from deepplanning_common import (
+        BENCHMARK_ROOT,
+        DATA_ROOT,
+        OUTPUT_ROOT,
+        clear_imported_modules,
+        compose_config,
+        ensure_directory,
+        ensure_repo_imports,
+        filter_samples_by_ids,
+        load_dotenv,
+        load_json_file,
+        load_model_config,
+        parse_id_list,
+        parse_int_list,
+        parse_space_separated,
+        resolve_repo_path,
+        write_json_file,
+    )
+except ModuleNotFoundError:
+    from scripts.deepplanning_common import (
+        BENCHMARK_ROOT,
+        DATA_ROOT,
+        OUTPUT_ROOT,
+        clear_imported_modules,
+        compose_config,
+        ensure_directory,
+        ensure_repo_imports,
+        filter_samples_by_ids,
+        load_dotenv,
+        load_json_file,
+        load_model_config,
+        parse_id_list,
+        parse_int_list,
+        parse_space_separated,
+        resolve_repo_path,
+        write_json_file,
+    )
 
 SHOPPING_ROOT = BENCHMARK_ROOT / "shoppingplanning"
 SHOPPING_DATA_ROOT = DATA_ROOT / "shopping"
 SHOPPING_OUTPUT_ROOT = OUTPUT_ROOT / "shopping"
 
+ensure_repo_imports()
 
-def import_modules() -> tuple[object, object, object, object, object]:
-    clear_imported_modules(["agent", "evaluation", "prompts", "call_llm"])
+from agent import shopping as shopping_runner
+
+
+def import_modules() -> tuple[object, object]:
+    clear_imported_modules(["evaluation", "score_statistics"])
     sys.path.insert(0, str(SHOPPING_ROOT))
 
-    import agent.call_llm as shopping_call_llm
-    import agent.shopping_agent as shopping_agent
     import evaluation.evaluation_pipeline as evaluation_pipeline
     import evaluation.score_statistics as score_statistics
-    from agent.prompts import prompt_lib
 
-    shopping_call_llm.load_model_config = load_model_config
-    return (
-        shopping_call_llm,
-        prompt_lib,
-        shopping_agent,
-        evaluation_pipeline,
-        score_statistics,
-    )
+    return evaluation_pipeline, score_statistics
 
 
 def evaluate_database(
@@ -121,14 +137,13 @@ def run(
     models: str | None = None,
     levels: str | None = None,
     sample_ids: str | None = None,
+    system: str | None = None,
     workers: int | None = None,
     max_llm_calls: int | None = None,
     output_root: str | None = None,
 ) -> None:
     load_dotenv()
-    _, prompt_lib, shopping_agent, evaluation_pipeline, score_statistics = (
-        import_modules()
-    )
+    evaluation_pipeline, score_statistics = import_modules()
 
     cfg = compose_config(
         "shopping",
@@ -136,6 +151,7 @@ def run(
             "models": models,
             "levels": levels,
             "sample_ids": sample_ids,
+            "system": system,
             "workers": workers,
             "max_llm_calls": max_llm_calls,
             "output_root": output_root,
@@ -181,8 +197,8 @@ def run(
             if selected_sample_ids is not None:
                 print(f"   Sample IDs: {', '.join(selected_sample_ids)}")
 
-            system_prompt = getattr(prompt_lib, f"SYSTEM_PROMPT_level{level}")
-            results = shopping_agent.run_agent_inference(
+            system_prompt = shopping_runner.get_system_prompt(level)
+            results = shopping_runner.run_agent_inference(
                 model=model,
                 test_data_path=test_data_path,
                 database_dir=run_database_dir,
@@ -190,6 +206,7 @@ def run(
                 system_prompt=system_prompt,
                 workers=int(cfg.workers),
                 max_llm_calls=int(cfg.max_llm_calls),
+                system=str(cfg.system),
             )
             print(
                 f"✅ Shopping inference complete: {results['success']}/{results['total']} succeeded"

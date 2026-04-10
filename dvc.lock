@@ -5,8 +5,8 @@ stages:
     deps:
     - path: scripts/download_deepplanning_data.py
       hash: md5
-      md5: 5f420c16a6bf4c9ade6e6979ee91acce
-      size: 3793
+      md5: 3830337386ac76e32e6fe0d6b66ea17d
+      size: 3792
     outs:
     - path: data/deepplanning/shopping/database_level1
       hash: md5

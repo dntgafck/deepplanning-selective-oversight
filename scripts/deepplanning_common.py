@@ -19,6 +19,12 @@ MODELS_CONFIG_PATH = CONFIG_ROOT / "models.yaml"
 DOTENV_PATH = REPO_ROOT / ".env"
 
 
+def ensure_repo_imports() -> None:
+    repo_root = str(REPO_ROOT)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+
 def load_dotenv(path: Path = DOTENV_PATH) -> None:
     if not path.exists():
         return

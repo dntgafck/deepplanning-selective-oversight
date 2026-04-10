@@ -4,40 +4,62 @@ import sys
 from pathlib import Path
 
 import fire
-from deepplanning_common import (
-    BENCHMARK_ROOT,
-    DATA_ROOT,
-    OUTPUT_ROOT,
-    clear_imported_modules,
-    compose_config,
-    ensure_directory,
-    filter_samples_by_ids,
-    load_dotenv,
-    load_json_file,
-    load_model_config,
-    parse_id_list,
-    parse_space_separated,
-    resolve_repo_path,
-    write_json_file,
-)
+
+try:
+    from deepplanning_common import (
+        BENCHMARK_ROOT,
+        DATA_ROOT,
+        OUTPUT_ROOT,
+        clear_imported_modules,
+        compose_config,
+        ensure_directory,
+        ensure_repo_imports,
+        filter_samples_by_ids,
+        load_dotenv,
+        load_json_file,
+        load_model_config,
+        parse_id_list,
+        parse_space_separated,
+        resolve_repo_path,
+        write_json_file,
+    )
+except ModuleNotFoundError:
+    from scripts.deepplanning_common import (
+        BENCHMARK_ROOT,
+        DATA_ROOT,
+        OUTPUT_ROOT,
+        clear_imported_modules,
+        compose_config,
+        ensure_directory,
+        ensure_repo_imports,
+        filter_samples_by_ids,
+        load_dotenv,
+        load_json_file,
+        load_model_config,
+        parse_id_list,
+        parse_space_separated,
+        resolve_repo_path,
+        write_json_file,
+    )
 
 TRAVEL_ROOT = BENCHMARK_ROOT / "travelplanning"
 TRAVEL_DATA_ROOT = DATA_ROOT / "travel" / "database"
 TRAVEL_OUTPUT_ROOT = OUTPUT_ROOT / "travel"
 
+ensure_repo_imports()
 
-def import_modules() -> tuple[object, object, object]:
-    clear_imported_modules(["agent", "evaluation", "prompts", "call_llm", "run"])
+from agent import travel as travel_runner
+
+
+def import_modules() -> tuple[object, object]:
+    clear_imported_modules(["evaluation", "prompts", "call_llm"])
     sys.path.insert(0, str(TRAVEL_ROOT))
 
-    import agent.call_llm as travel_call_llm
     import evaluation.convert_report as convert_report
     import evaluation.eval_converted as eval_converted
-    import run as travel_run
 
-    travel_call_llm.load_model_config = load_model_config
     convert_report.load_model_config = load_model_config
-    return convert_report, eval_converted, travel_run
+    return convert_report, eval_converted
 
 
 def prepare_test_data(
@@ -65,10 +87,10 @@ def run_language(
     model: str,
     language: str,
     sample_ids: list[str] | None,
+    system: str,
     cfg: object,
     convert_report: object,
     eval_converted: object,
-    travel_run: object,
 ) -> None:
     database_dir = TRAVEL_DATA_ROOT / f"database_{language}"
     if not database_dir.exists():
@@ -95,7 +117,7 @@ def run_language(
         print(f"   Sample IDs: {', '.join(sample_ids)}")
 
     if cfg.start_from == "inference":
-        inference_results = travel_run.run_agent_inference(
+        inference_results = travel_runner.run_agent_inference(
             model=model,
             language=language,
             test_data_path=test_data_path,
@@ -104,6 +126,7 @@ def run_language(
             output_dir=output_dir,
             workers=int(cfg.workers),
             max_llm_calls=int(cfg.max_llm_calls),
+            system=system,
         )
         print(
             f"✅ Travel inference complete: {inference_results['success']}/{inference_results['total']} succeeded"
@@ -140,6 +163,7 @@ def run(
     models: str | None = None,
     language: str | None = None,
     sample_ids: str | None = None,
+    system: str | None = None,
     workers: int | None = None,
     max_llm_calls: int | None = None,
     start_from: str | None = None,
@@ -148,7 +172,7 @@ def run(
     debug: bool | None = None,
 ) -> None:
     load_dotenv()
-    convert_report, eval_converted, travel_run = import_modules()
+    convert_report, eval_converted = import_modules()
 
     cfg = compose_config(
         "travel",
@@ -156,6 +180,7 @@ def run(
             "models": models,
             "language": language,
             "sample_ids": sample_ids,
+            "system": system,
             "workers": workers,
             "max_llm_calls": max_llm_calls,
             "start_from": start_from,
@@ -177,10 +202,10 @@ def run(
                 model,
                 language,
                 selected_sample_ids,
+                str(cfg.system),
                 cfg,
                 convert_report,
                 eval_converted,
-                travel_run,
             )
 
 

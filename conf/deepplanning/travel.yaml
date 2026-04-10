@@ -1,6 +1,7 @@
 models: qwen-plus
 language: ""
 sample_ids: ""
+system: A
 workers: 50
 max_llm_calls: 400
 start_from: inference
