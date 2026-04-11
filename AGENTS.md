@@ -2,8 +2,8 @@
 
 - Use the root Pixi environment for repo commands, including DVC:
   `pixi run ...`.
-- Prefer Pixi tasks over ad hoc invocation. Benchmark entrypoint should be run
-  as `pixi run deepplanning-benchmark -- ...`.
+- Prefer Pixi tasks over ad hoc invocation. Public benchmark entrypoint should
+  be run as `pixi run deepplanning-experiment -- ...`.
 - This repo is mostly a wrapper around the benchmark submodule. The code that
   actually runs DeepPlanning lives in
   `external/qwen-agent/benchmark/deepplanning/`; root currently only adds
@@ -11,31 +11,32 @@
 - `external/qwen-agent` is a git submodule. Treat submodule updates as
   deliberate; do not rewrite or replace vendored benchmark code unless the task
   explicitly requires it.
-- Root wrapper CLIs use Hydra config files under `conf/deepplanning/` plus Fire
-  argument overrides. Prefer updating defaults there and use Fire-style flags
-  such as `--models="qwen-plus"` or `--travel_language=en` when invoking wrapper
-  scripts.
+- Root wrapper CLIs use the canonical Hydra config tree under `configs/`. Prefer
+  Hydra-style overrides such as `experiment=system_a_smoke`,
+  `models.executor=qwen-plus`, or `travel.language=en`. The older direct
+  benchmark/domain scripts are compatibility wrappers, not the documented public
+  interface.
 
 - Data bootstrap is wired through the root DVC stage `deepplanning_data` in
   `dvc.yaml`. It runs `scripts/download_deepplanning_data.py` and stores
   benchmark databases under `data/deepplanning/` so the submodule stays clean.
-- The benchmark entrypoint for this repo is
-  `scripts/run_deepplanning_benchmark.py`. Run it from the repo root with Pixi,
-  e.g. `pixi run deepplanning-benchmark -- --domains="travel shopping"`.
+- The public benchmark entrypoint for this repo is `scripts/run_experiment.py`.
+  Run it from the repo root with Pixi, e.g.
+  `pixi run deepplanning-experiment -- experiment=system_a_smoke`.
 - Keep `.env` at the repo root, not inside `external/qwen-agent/`. Root wrapper
-  model definitions live in Hydra config under `conf/deepplanning/models.yaml`
-  and are patched into vendored benchmark imports at runtime.
+  model definitions live in Hydra config under `configs/models.yaml` and are
+  patched into vendored benchmark imports at runtime.
 
 - Focused benchmark runs use the root wrappers so data and outputs stay outside
   the submodule:
 - Shopping only:
-  `pixi run deepplanning-benchmark -- --domains="shopping" --models="qwen-plus"`
+  `pixi run deepplanning-experiment -- name=shopping-only domains=[shopping] models.executor=qwen-plus`
 - Travel only:
-  `pixi run deepplanning-benchmark -- --domains="travel" --models="qwen-plus"`
+  `pixi run deepplanning-experiment -- name=travel-only domains=[travel] models.executor=qwen-plus`
 - Unified runner:
-  `pixi run deepplanning-benchmark -- --domains="travel shopping" --models="qwen-plus"`
-- Travel control knobs map to wrapper args: `--language`, `--start_from`, and
-  `--output_root`.
+  `pixi run deepplanning-experiment -- name=travel-shopping domains=[travel,shopping] models.executor=qwen-plus`
+- Travel control knobs map to Hydra overrides such as `travel.language`,
+  `travel.start_from`, and `session_root`.
 
 - Travel results now live under `outputs/deepplanning/travel/`; if you need a
   fresh rerun, clear or change that output directory first.

@@ -107,20 +107,35 @@ This repo keeps the vendored benchmark submodule read-only during normal use.
 
 - Benchmark data is materialized by DVC under `data/deepplanning/`
 - Runtime artifacts are written under `outputs/deepplanning/`
-- `models_config.json` and `.env` live at the repo root
-- Wrapper defaults live under `conf/deepplanning/` and can be overridden via
-  Fire CLI flags
+- `.env` lives at the repo root
+- The wrapper config source of truth lives under `configs/`
+- Model transport aliases are owned by the wrapper layer in
+  `configs/models.yaml`
 
-Typical commands:
-
-```bash
-pixi exec dvc repro deepplanning_data
-pixi run run-deepplanning
-```
-
-Focused runs:
+Public benchmark runner:
 
 ```bash
-pixi exec python scripts/run_deepplanning_shopping.py --models="qwen-plus"
-pixi exec python scripts/run_deepplanning_travel.py --models="qwen-plus" --language=en
+pixi run dvc repro deepplanning_data
+pixi run deepplanning-experiment -- experiment=system_a_smoke
 ```
+
+Override examples:
+
+```bash
+pixi run deepplanning-experiment -- experiment=system_a_smoke name=my-smoke
+pixi run deepplanning-experiment -- name=travel-c2 domains=[travel] system=C2 travel.language=en
+pixi run deepplanning-experiment -- name=shop-ablation domains=[shopping] shopping.levels=[1,2] models.executor=qwen-plus
+```
+
+Each experiment session writes a timestamped directory under
+`outputs/deepplanning/experiments/<name>/<timestamp>/` containing:
+
+- `config.yaml`
+- `overrides.txt`
+- `experiment_session.json`
+- domain outputs under `travel/` and `shopping/`
+
+The older `scripts/run_deepplanning_benchmark.py`,
+`scripts/run_deepplanning_shopping.py`, and `scripts/run_deepplanning_travel.py`
+entrypoints remain as thin internal/debug wrappers, but the documented interface
+is `scripts/run_experiment.py` via `pixi run deepplanning-experiment`.

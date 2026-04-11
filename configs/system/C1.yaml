@@ -1,0 +1,4 @@
+name: C1
+oversight_enabled: true
+oversight_mode: checkpoint
+overseer_thinking: true

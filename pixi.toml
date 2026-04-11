@@ -8,7 +8,7 @@ version = "0.1.0"
 [tasks]
 lint-all = "pre-commit run --all-files"
 test = "pytest"
-deepplanning-benchmark = "python scripts/run_deepplanning_benchmark.py"
+deepplanning-benchmark = "python scripts/run_experiment.py"
 deepplanning-experiment = "python scripts/run_experiment.py"
 
 [dependencies]

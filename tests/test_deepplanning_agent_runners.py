@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
+from omegaconf import OmegaConf
+
 from agent import shopping as shopping_module
 from agent import travel as travel_module
 from experiment import StructuredLogger, build_system_config
@@ -623,137 +625,178 @@ def test_travel_run_agent_inference_serializes_tool_calls_in_trajectory(
 
 
 def test_benchmark_wrapper_forwards_runs_to_domain_scripts(monkeypatch):
-    commands: list[list[str]] = []
+    from deepplanning import orchestration as orchestration_module
+
+    shopping_calls: list[Path] = []
+    travel_calls: list[Path] = []
     aggregate_roots: list[Path | None] = []
-    monkeypatch.setattr(benchmark_script, "run_subprocess", commands.append)
     monkeypatch.setattr(
-        benchmark_script,
+        orchestration_module,
+        "run_shopping",
+        lambda **kwargs: shopping_calls.append(kwargs["output_root"]),
+    )
+    monkeypatch.setattr(
+        orchestration_module,
+        "run_travel",
+        lambda **kwargs: travel_calls.append(kwargs["output_root"]),
+    )
+    monkeypatch.setattr(
+        orchestration_module,
         "aggregate_results",
         lambda model, benchmark_output_root=None: aggregate_roots.append(
             benchmark_output_root
         ),
     )
     monkeypatch.setattr(
-        benchmark_script,
+        orchestration_module,
         "compose_config",
-        lambda config_name, overrides: SimpleNamespace(
-            domains="travel shopping",
-            models="qwen3-14b",
-            system="A",
-            shopping_levels="1",
-            shopping_sample_ids="0",
-            workers=1,
-            max_llm_calls=20,
-            runs=4,
-            travel_language="en",
-            travel_start_from="inference",
-            travel_evaluation_mode="auto",
-            travel_sample_ids="0",
-            output_root=str(Path("/tmp") / "bench-session"),
+        lambda config_name, overrides: OmegaConf.create(
+            {
+                "domains": ["travel", "shopping"],
+                "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
+                "system": {"name": "A"},
+                "runtime": {"workers": 1, "max_llm_calls": 20, "runs": 4},
+                "shopping": {"levels": [1], "sample_ids": ["0"]},
+                "travel": {
+                    "language": "en",
+                    "start_from": "inference",
+                    "evaluation_mode": "auto",
+                    "sample_ids": ["0"],
+                    "verbose": False,
+                    "debug": False,
+                },
+                "output_root": str(Path("/tmp") / "bench-session"),
+                "session_root": "",
+            }
         ),
     )
 
-    benchmark_script.run(runs=4)
+    benchmark_script.run(runs=4, output_root=str(Path("/tmp") / "bench-session"))
 
-    assert len(commands) == 2
-    assert any(argument == "--runs=4" for argument in commands[0])
-    assert any(argument == "--runs=4" for argument in commands[1])
-    assert any(argument == "--sample_ids=0" for argument in commands[0])
-    assert any(argument == "--sample_ids=0" for argument in commands[1])
-    assert any(argument == "--evaluation_mode=auto" for argument in commands[1])
-    assert any(
-        "shopping" in argument
-        for argument in commands[0]
-        if argument.startswith("--output_root=")
-    )
-    assert any(
-        "travel" in argument
-        for argument in commands[1]
-        if argument.startswith("--output_root=")
-    )
+    assert shopping_calls == [Path("/tmp") / "bench-session" / "shopping"]
+    assert travel_calls == [Path("/tmp") / "bench-session" / "travel"]
     assert aggregate_roots == [Path("/tmp") / "bench-session"]
 
 
 def test_run_experiment_loads_named_config_and_writes_session_metadata(
     monkeypatch, tmp_path
 ):
-    experiments_dir = tmp_path / "experiments"
-    experiments_dir.mkdir()
+    from deepplanning import orchestration as orchestration_module
+
+    config_root = tmp_path / "configs"
+    experiments_dir = config_root / "experiments"
+    experiments_dir.mkdir(parents=True)
     (experiments_dir / "named.yaml").write_text(
-        "\n".join(
-            [
-                "name: system-a-proof",
-                "domains: travel shopping",
-                "models: qwen3-14b",
-                "system: A",
-                "workers: 2",
-                "max_llm_calls: 15",
-                "runs: 3",
-                "travel_language: en",
-                'travel_sample_ids: "0"',
-                'shopping_levels: "1"',
-                'shopping_sample_ids: "1"',
-            ]
-        ),
-        encoding="utf-8",
+        "name: system-a-proof\n", encoding="utf-8"
     )
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(experiment_script, "EXPERIMENTS_CONFIG_ROOT", experiments_dir)
     monkeypatch.setattr(
-        experiment_script, "_session_timestamp", lambda: "2026-04-11_12-00-00"
+        orchestration_module, "_session_timestamp", lambda: "2026-04-11_12-00-00"
     )
     monkeypatch.setattr(
-        experiment_script,
-        "run_benchmark",
-        lambda **kwargs: captured.update(kwargs),
+        orchestration_module,
+        "compose_config",
+        lambda config_name, overrides: OmegaConf.create(
+            {
+                "name": "system-a-proof",
+                "domains": ["travel", "shopping"],
+                "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
+                "system": {"name": "A"},
+                "runtime": {"workers": 2, "max_llm_calls": 15, "runs": 3},
+                "shopping": {"levels": [1], "sample_ids": ["1"]},
+                "travel": {
+                    "language": "en",
+                    "start_from": "inference",
+                    "evaluation_mode": "auto",
+                    "sample_ids": ["0"],
+                    "verbose": False,
+                    "debug": False,
+                },
+                "output_root": str(tmp_path / "sessions"),
+                "session_root": "",
+                "metadata_filename": "experiment_session.json",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        orchestration_module,
+        "named_experiment_path",
+        lambda experiment_key: (
+            experiments_dir / f"{experiment_key}.yaml" if experiment_key else None
+        ),
+    )
+    monkeypatch.setattr(
+        orchestration_module,
+        "run_benchmark_from_cfg",
+        lambda cfg, benchmark_output_root=None: captured.update(
+            {
+                "cfg": cfg,
+                "benchmark_output_root": benchmark_output_root,
+            }
+        ),
     )
 
-    experiment_script.run(experiment="named", output_root=str(tmp_path / "sessions"))
+    experiment_script.run("experiment=named", f"output_root={tmp_path / 'sessions'}")
 
     session_root = tmp_path / "sessions" / "system-a-proof" / "2026-04-11_12-00-00"
     metadata = json.loads(
         (session_root / "experiment_session.json").read_text(encoding="utf-8")
     )
 
-    assert captured["domains"] == "travel shopping"
-    assert captured["runs"] == 3
-    assert captured["workers"] == 2
-    assert captured["output_root"] == str(session_root)
+    assert captured["benchmark_output_root"] == session_root
     assert metadata["experiment"]["key"] == "named"
     assert metadata["experiment"]["name"] == "system-a-proof"
-    assert metadata["parameters"]["travel_sample_ids"] == "0"
-    assert metadata["parameters"]["shopping_sample_ids"] == "1"
-    assert metadata["parameters"]["output_root"] == str(session_root)
+    assert metadata["experiment"]["config_path"] == str(experiments_dir / "named.yaml")
+    assert metadata["parameters"]["travel"]["sample_ids"] == ["0"]
+    assert metadata["parameters"]["shopping"]["sample_ids"] == ["1"]
+    assert metadata["parameters"]["session_root"] == str(session_root)
     assert metadata["launched_command"][:4] == [
         "pixi",
         "run",
-        "deepplanning-benchmark",
+        "deepplanning-experiment",
         "--",
+    ]
+    assert (session_root / "config.yaml").exists()
+    assert (session_root / "overrides.txt").read_text(
+        encoding="utf-8"
+    ).splitlines() == [
+        "experiment=named",
+        f"output_root={tmp_path / 'sessions'}",
     ]
 
 
-def test_checked_in_system_a_smoke_config_uses_existing_benchmark_sample_ids():
-    config, config_path = experiment_script._load_named_experiment_config(
-        "system_a_smoke"
-    )
+def test_real_hydra_composes_named_experiment_config():
+    from deepplanning.config import compose_config
 
-    shopping_sample_ids = parse_id_list(str(config["shopping_sample_ids"]))
+    cfg = compose_config("experiment", ["experiment=system_a_smoke"])
+
+    assert cfg.name == "system-a-smoke"
+    assert list(cfg.domains) == ["travel", "shopping"]
+    assert list(cfg.shopping.levels) == [1]
+    assert list(cfg.shopping.sample_ids) == ["1"]
+    assert str(cfg.travel.language) == "en"
+    assert list(cfg.travel.sample_ids) == ["0"]
+    assert str(cfg.system.name) == "A"
+
+
+def test_checked_in_system_a_smoke_config_uses_existing_benchmark_sample_ids():
+    config_path = REPO_ROOT / "configs" / "experiments" / "system_a_smoke.yaml"
+    config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
+
+    shopping_sample_ids = parse_id_list(config["shopping"]["sample_ids"])
     shopping_samples = load_json_file(
         shopping_script.SHOPPING_ROOT
         / "data"
-        / f"level_{config['shopping_levels']}_query_meta.json"
+        / f"level_{config['shopping']['levels'][0]}_query_meta.json"
     )
-    travel_sample_ids = parse_id_list(str(config["travel_sample_ids"]))
+    travel_sample_ids = parse_id_list(config["travel"]["sample_ids"])
     travel_samples = load_json_file(
         travel_script.TRAVEL_ROOT
         / "data"
-        / f"travelplanning_query_{config['travel_language']}.json"
+        / f"travelplanning_query_{config['travel']['language']}.json"
     )
 
-    assert config_path == (
-        experiment_script.EXPERIMENTS_CONFIG_ROOT / "system_a_smoke.yaml"
-    )
     assert filter_samples_by_ids(shopping_samples, shopping_sample_ids)
     assert filter_samples_by_ids(travel_samples, travel_sample_ids)
 
@@ -993,6 +1036,9 @@ def test_travel_wrapper_writes_generated_data_only_summary_on_conversion_failure
 
 
 def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
+    from deepplanning import orchestration as orchestration_module
+    from deepplanning import shopping_runner as shopping_runtime_module
+
     (tmp_path / "database_level1").mkdir()
     test_data_path = tmp_path / "shopping_samples.json"
     test_data_path.write_text(
@@ -1000,26 +1046,35 @@ def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(shopping_script, "SHOPPING_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(shopping_script, "load_dotenv", lambda: None)
+    monkeypatch.setattr(shopping_runtime_module, "SHOPPING_DATA_ROOT", tmp_path)
+    monkeypatch.setattr(shopping_runtime_module, "load_dotenv", lambda: None)
     monkeypatch.setattr(
-        shopping_script,
+        shopping_runtime_module,
         "import_modules",
         lambda: (object(), object()),
     )
-    monkeypatch.setattr(shopping_script, "load_model_config", lambda model: {})
+    monkeypatch.setattr(shopping_runtime_module, "load_model_config", lambda model: {})
     monkeypatch.setattr(
-        shopping_script,
+        orchestration_module,
         "compose_config",
-        lambda config_name, overrides: SimpleNamespace(
-            models="qwen3-14b",
-            levels="1",
-            sample_ids="",
-            system="A",
-            workers=1,
-            max_llm_calls=2,
-            runs=2,
-            output_root=str(tmp_path / "shopping_output"),
+        lambda config_name, overrides: OmegaConf.create(
+            {
+                "domains": ["shopping"],
+                "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
+                "system": {"name": "A"},
+                "runtime": {"workers": 1, "max_llm_calls": 2, "runs": 2},
+                "shopping": {"levels": [1], "sample_ids": []},
+                "travel": {
+                    "language": "en",
+                    "start_from": "inference",
+                    "evaluation_mode": "auto",
+                    "sample_ids": [],
+                    "verbose": False,
+                    "debug": False,
+                },
+                "output_root": str(tmp_path / "shopping_output"),
+                "session_root": "",
+            }
         ),
     )
 
@@ -1033,18 +1088,20 @@ def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
         (run_database_dir / "case_1").mkdir()
         return test_data_path
 
-    monkeypatch.setattr(shopping_script, "prepare_run_inputs", fake_prepare_run_inputs)
+    monkeypatch.setattr(
+        shopping_runtime_module, "prepare_run_inputs", fake_prepare_run_inputs
+    )
 
     inference_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        shopping_script.shopping_runner,
+        shopping_runtime_module.shopping_agent_runner,
         "run_agent_inference",
         lambda **kwargs: inference_calls.append(kwargs) or {"success": 2, "total": 2},
     )
 
     evaluation_calls: list[tuple[Path, Path]] = []
     monkeypatch.setattr(
-        shopping_script,
+        shopping_runtime_module,
         "evaluate_database",
         lambda database_dir, report_dir, evaluation_pipeline: evaluation_calls.append(
             (database_dir, report_dir)
@@ -1053,7 +1110,7 @@ def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
 
     statistics_roots: list[Path] = []
     monkeypatch.setattr(
-        shopping_script,
+        shopping_runtime_module,
         "write_statistics",
         lambda model, result_report_root, score_statistics: statistics_roots.append(
             result_report_root

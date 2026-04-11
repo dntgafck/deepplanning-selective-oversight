@@ -63,4 +63,3 @@ class BaseTool(ABC):
             "description": self.description,
             "parameters": self.parameters,
         }
-

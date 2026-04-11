@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - override /system: A
+
+name: system-a-smoke
+domains:
+  - travel
+  - shopping
+models:
+  executor: qwen3-14b
+runtime:
+  workers: 1
+  max_llm_calls: 20
+  runs: 1
+shopping:
+  levels:
+    - 1
+  sample_ids:
+    - "1"
+travel:
+  language: en
+  start_from: inference
+  evaluation_mode: auto
+  sample_ids:
+    - "0"

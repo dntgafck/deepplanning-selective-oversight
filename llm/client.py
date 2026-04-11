@@ -11,7 +11,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from scripts.deepplanning_common import load_model_config
+from deepplanning.config import load_model_config
 
 
 def _is_reasoning_model(model_name: str) -> bool:

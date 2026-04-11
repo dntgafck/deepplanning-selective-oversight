@@ -1,0 +1,18 @@
+defaults:
+  - runtime: default
+  - shopping: default
+  - travel: default
+  - system: A
+  - _self_
+  - optional experiments: null
+
+name: ""
+output_root: outputs/deepplanning/experiments
+session_root: ""
+metadata_filename: experiment_session.json
+domains:
+  - travel
+  - shopping
+models:
+  executor: qwen3-14b
+  overseer: deepseek-v3.2

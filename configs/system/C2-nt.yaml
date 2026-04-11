@@ -1,0 +1,4 @@
+name: C2-nt
+oversight_enabled: true
+oversight_mode: adaptive
+overseer_thinking: false
