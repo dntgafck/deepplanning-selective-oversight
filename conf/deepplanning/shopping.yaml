@@ -1,7 +1,8 @@
-models: qwen-plus
+models: qwen3-14b
 levels: 1 2 3
 sample_ids: ""
 system: A
 workers: 50
 max_llm_calls: 400
+runs: 4
 output_root: outputs/deepplanning/shopping

@@ -3,9 +3,131 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _isoformat_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _serialize_tool_call(tool_call: Any) -> dict[str, Any]:
+    if isinstance(tool_call, dict):
+        return {
+            key: _to_jsonable(value)
+            for key, value in tool_call.items()
+            if value is not None
+        }
+
+    payload: dict[str, Any] = {}
+    tool_call_id = getattr(tool_call, "id", None)
+    if tool_call_id is not None:
+        payload["id"] = tool_call_id
+
+    tool_type = getattr(tool_call, "type", None)
+    if tool_type is not None:
+        payload["type"] = tool_type
+
+    function = getattr(tool_call, "function", None)
+    if function is not None:
+        payload["function"] = {
+            "name": getattr(function, "name", None),
+            "arguments": getattr(function, "arguments", None),
+        }
+
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _serialize_usage(usage: Any) -> dict[str, Any] | None:
+    if usage is None:
+        return None
+
+    payload = {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _coerce_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    raise TypeError(f"Unsupported timestamp value: {type(value)!r}")
+
+
+def _to_jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if hasattr(value, "model_dump"):
+        return _to_jsonable(value.model_dump(exclude_none=True))
+    if hasattr(value, "__dict__"):
+        return _to_jsonable(vars(value))
+    return str(value)
+
+
+def serialize_message(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        return _to_jsonable(message)
+
+    payload: dict[str, Any] = {}
+    for field_name in ("role", "content", "name", "tool_call_id", "reasoning_content"):
+        field_value = getattr(message, field_name, None)
+        if field_value is not None:
+            payload[field_name] = field_value
+
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        payload["tool_calls"] = [
+            _serialize_tool_call(tool_call) for tool_call in tool_calls
+        ]
+
+    return _to_jsonable(payload)
+
+
+def serialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    return [serialize_message(message) for message in messages]
+
+
+def serialize_response(response: Any) -> dict[str, Any]:
+    if response is None:
+        return {}
+    if hasattr(response, "model_dump"):
+        return _to_jsonable(response.model_dump(exclude_none=True))
+
+    payload: dict[str, Any] = {}
+    for field_name in ("id", "model", "system_fingerprint"):
+        field_value = getattr(response, field_name, None)
+        if field_value is not None:
+            payload[field_name] = field_value
+
+    choices = []
+    for index, choice in enumerate(getattr(response, "choices", []) or []):
+        choices.append(
+            {
+                "index": getattr(choice, "index", index),
+                "finish_reason": getattr(choice, "finish_reason", None),
+                "message": serialize_message(getattr(choice, "message", None)),
+            }
+        )
+    payload["choices"] = choices
+
+    usage_payload = _serialize_usage(getattr(response, "usage", None))
+    if usage_payload is not None:
+        payload["usage"] = usage_payload
+
+    return _to_jsonable(payload)
 
 
 @dataclass
@@ -27,17 +149,63 @@ class StructuredLogger:
         if self.output_dir is None or self.events_path is None:
             return
         record = {
-            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "timestamp": _isoformat_utc(datetime.now(timezone.utc)),
             "event_type": event_type,
             **payload,
         }
         await self._append_jsonl(self.events_path, record)
 
+    async def log_turn(
+        self,
+        *,
+        domain: str,
+        task_id: str,
+        run_id: int,
+        phase: str,
+        turn_index: int,
+        started_at: Any,
+        ended_at: Any,
+        request_messages: list[Any],
+        raw_response: Any,
+        parsed_tool_calls: list[dict[str, Any]],
+        parse_warnings: list[str],
+        tool_results: list[dict[str, Any]],
+        prompt_tokens: int,
+        completion_tokens: int,
+        stop_reason: str,
+        model_alias: str,
+    ) -> None:
+        started_at_dt = _coerce_datetime(started_at)
+        ended_at_dt = _coerce_datetime(ended_at)
+        duration_ms = int((ended_at_dt - started_at_dt).total_seconds() * 1000)
+        await self.log_event(
+            "executor_turn",
+            {
+                "domain": domain,
+                "task_id": task_id,
+                "run_id": run_id,
+                "phase": phase,
+                "turn_index": turn_index,
+                "started_at": _isoformat_utc(started_at_dt),
+                "ended_at": _isoformat_utc(ended_at_dt),
+                "duration_ms": duration_ms,
+                "request_messages": serialize_messages(request_messages),
+                "raw_response": serialize_response(raw_response),
+                "parsed_tool_calls": _to_jsonable(parsed_tool_calls),
+                "parse_warnings": list(parse_warnings),
+                "tool_results": _to_jsonable(tool_results),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "stop_reason": stop_reason,
+                "model_alias": model_alias,
+            },
+        )
+
     async def log_result(self, payload: dict[str, Any]) -> None:
         if self.output_dir is None or self.results_path is None:
             return
         record = {
-            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "timestamp": _isoformat_utc(datetime.now(timezone.utc)),
             **payload,
         }
         await self._append_jsonl(self.results_path, record)

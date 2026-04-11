@@ -36,6 +36,7 @@ def _merge_reasoning(
 class ProviderConfig:
     alias: str
     model: str
+    provider: str | None = None
     api_base: str | None = None
     api_key_env: str | None = None
     temperature: float | None = None
@@ -49,6 +50,7 @@ class ProviderConfig:
         return cls(
             alias=model_name,
             model=config.get("model_name", model_name),
+            provider=config.get("model_type"),
             api_base=config.get("base_url"),
             api_key_env=config.get("api_key_env"),
             temperature=config.get("temperature"),
@@ -74,6 +76,23 @@ def _validate_response(response: Any) -> None:
     has_tool_calls = bool(getattr(message, "tool_calls", None))
     if not has_content and not has_tool_calls:
         raise ValueError("Model returned an empty response without tool calls")
+
+
+def _retryable_exception_types(litellm_module: Any) -> tuple[type[BaseException], ...]:
+    exception_names = (
+        "APIConnectionError",
+        "APIError",
+        "InternalServerError",
+        "RateLimitError",
+        "ServiceUnavailableError",
+        "Timeout",
+    )
+    retryable: list[type[BaseException]] = [ConnectionError, OSError, TimeoutError]
+    for name in exception_names:
+        exc_type = getattr(litellm_module, name, None)
+        if isinstance(exc_type, type) and issubclass(exc_type, BaseException):
+            retryable.append(exc_type)
+    return tuple(dict.fromkeys(retryable))
 
 
 def _configure_litellm_callbacks() -> None:
@@ -102,6 +121,7 @@ async def call_chat_completion(
     messages: list[Any],
     tools: list[dict[str, Any]] | None = None,
     reasoning_enabled: bool | None = None,
+    validate_nonempty: bool = False,
 ) -> Any:
     import litellm
 
@@ -118,6 +138,8 @@ async def call_chat_completion(
         "messages": messages,
         "api_key": api_key,
     }
+    if provider.provider:
+        params["custom_llm_provider"] = provider.provider
     if provider.api_base:
         params["api_base"] = provider.api_base
     if tools:
@@ -134,12 +156,13 @@ async def call_chat_completion(
         wait=wait_exponential(
             multiplier=max(provider.backoff, 0.1), min=max(provider.backoff, 0.1)
         ),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception_type(_retryable_exception_types(litellm)),
         reraise=True,
     ):
         with attempt:
             response = await litellm.acompletion(**params)
-            _validate_response(response)
+            if validate_nonempty:
+                _validate_response(response)
             return response
 
     raise RuntimeError("LLM call failed unexpectedly")

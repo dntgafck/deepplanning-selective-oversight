@@ -1,10 +1,13 @@
 domains: travel shopping
-models: qwen-plus
+models: qwen3-14b
 system: A
 shopping_levels: 1 2 3
 shopping_sample_ids: ""
 workers: 50
 max_llm_calls: 400
+runs: 4
 travel_language: ""
 travel_start_from: inference
+travel_evaluation_mode: auto
 travel_sample_ids: ""
+output_root: ""

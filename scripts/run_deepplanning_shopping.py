@@ -140,6 +140,7 @@ def run(
     system: str | None = None,
     workers: int | None = None,
     max_llm_calls: int | None = None,
+    runs: int | None = None,
     output_root: str | None = None,
 ) -> None:
     load_dotenv()
@@ -154,21 +155,22 @@ def run(
             "system": system,
             "workers": workers,
             "max_llm_calls": max_llm_calls,
+            "runs": runs,
             "output_root": output_root,
         },
     )
 
-    model_names = parse_space_separated(cfg.models, ["qwen-plus"])
+    model_names = parse_space_separated(cfg.models, ["qwen3-14b"])
     level_numbers = parse_int_list(cfg.levels, [1, 2, 3])
     selected_sample_ids = parse_id_list(cfg.sample_ids)
+    run_count = int(cfg.runs)
     output_root_path = resolve_repo_path(cfg.output_root)
 
     tool_schema_path = SHOPPING_ROOT / "tools" / "shopping_tool_schema.json"
-    database_output_root = ensure_directory(output_root_path / "database_infered")
-    result_report_root = ensure_directory(output_root_path / "result_report")
 
     for model in model_names:
         load_model_config(model)
+        model_output_root = ensure_directory(output_root_path / model)
 
         for level in level_numbers:
             source_database_dir = SHOPPING_DATA_ROOT / f"database_level{level}"
@@ -179,46 +181,80 @@ def run(
 
             timestamp = time.strftime("%Y%m%d%H%M")
             output_name = f"database_{model}_level{level}_{timestamp}"
-            run_database_dir = database_output_root / output_name
+            run_database_dirs: dict[int, Path] = {}
+            run_output_dirs: dict[int, Path] = {}
+            run_report_dirs: dict[int, Path] = {}
+            test_data_path: Path | None = None
 
-            if run_database_dir.exists():
-                shutil.rmtree(run_database_dir)
-            test_data_path = prepare_run_inputs(
-                level=level,
-                source_database_dir=source_database_dir,
-                run_database_dir=run_database_dir,
-                sample_ids=selected_sample_ids,
-            )
+            for run_id in range(run_count):
+                run_root = ensure_directory(model_output_root / f"run_{run_id}")
+                database_output_root = ensure_directory(run_root / "database_infered")
+                log_output_root = ensure_directory(run_root / "logs")
+                result_report_root = ensure_directory(run_root / "result_report")
+
+                run_database_dir = database_output_root / output_name
+                run_output_dir = ensure_directory(log_output_root / output_name)
+
+                if run_database_dir.exists():
+                    shutil.rmtree(run_database_dir)
+
+                current_test_data_path = prepare_run_inputs(
+                    level=level,
+                    source_database_dir=source_database_dir,
+                    run_database_dir=run_database_dir,
+                    sample_ids=selected_sample_ids,
+                )
+                if test_data_path is None:
+                    test_data_path = current_test_data_path
+
+                run_database_dirs[run_id] = run_database_dir
+                run_output_dirs[run_id] = run_output_dir
+                run_report_dirs[run_id] = result_report_root / output_name
 
             print("\n🚀 Shopping benchmark")
             print(f"   Model: {model}")
             print(f"   Level: {level}")
-            print(f"   Database: {run_database_dir}")
+            print(f"   Runs: {run_count}")
+            print(f"   Output root: {model_output_root}")
             if selected_sample_ids is not None:
                 print(f"   Sample IDs: {', '.join(selected_sample_ids)}")
 
             system_prompt = shopping_runner.get_system_prompt(level)
             results = shopping_runner.run_agent_inference(
                 model=model,
-                test_data_path=test_data_path,
-                database_dir=run_database_dir,
+                test_data_path=(
+                    test_data_path
+                    if test_data_path is not None
+                    else SHOPPING_ROOT / "data" / f"level_{level}_query_meta.json"
+                ),
+                database_dir=run_database_dirs[0],
                 tool_schema_path=tool_schema_path,
+                output_dir=run_output_dirs[0],
                 system_prompt=system_prompt,
                 workers=int(cfg.workers),
                 max_llm_calls=int(cfg.max_llm_calls),
+                runs=run_count,
                 system=str(cfg.system),
+                database_dir_by_run=run_database_dirs,
+                output_dir_by_run=run_output_dirs,
             )
             print(
                 f"✅ Shopping inference complete: {results['success']}/{results['total']} succeeded"
             )
 
-            evaluate_database(
-                database_dir=run_database_dir,
-                report_dir=result_report_root / output_name,
-                evaluation_pipeline=evaluation_pipeline,
-            )
+            for run_id in range(run_count):
+                evaluate_database(
+                    database_dir=run_database_dirs[run_id],
+                    report_dir=run_report_dirs[run_id],
+                    evaluation_pipeline=evaluation_pipeline,
+                )
 
-        write_statistics(model, result_report_root, score_statistics)
+        for run_id in range(run_count):
+            write_statistics(
+                model,
+                model_output_root / f"run_{run_id}" / "result_report",
+                score_statistics,
+            )
 
 
 if __name__ == "__main__":

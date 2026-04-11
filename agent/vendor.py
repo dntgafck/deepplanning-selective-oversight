@@ -21,6 +21,36 @@ def _ensure_path(path: Path) -> None:
         sys.path.insert(0, path_str)
 
 
+def _install_qwen_tool_shim() -> None:
+    if "qwen_agent.tools.base" in sys.modules:
+        return
+
+    from . import qwen_tool_shim
+
+    qwen_agent_module = sys.modules.get("qwen_agent")
+    if qwen_agent_module is None:
+        qwen_agent_module = ModuleType("qwen_agent")
+        qwen_agent_module.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["qwen_agent"] = qwen_agent_module
+
+    qwen_tools_module = sys.modules.get("qwen_agent.tools")
+    if qwen_tools_module is None:
+        qwen_tools_module = ModuleType("qwen_agent.tools")
+        qwen_tools_module.__path__ = []  # type: ignore[attr-defined]
+        sys.modules["qwen_agent.tools"] = qwen_tools_module
+
+    base_module = ModuleType("qwen_agent.tools.base")
+    base_module.BaseTool = qwen_tool_shim.BaseTool
+    base_module.TOOL_REGISTRY = qwen_tool_shim.TOOL_REGISTRY
+    base_module.register_tool = qwen_tool_shim.register_tool
+
+    sys.modules["qwen_agent.tools.base"] = base_module
+    qwen_agent_module.tools = qwen_tools_module
+    qwen_tools_module.base = base_module
+    qwen_tools_module.BaseTool = qwen_tool_shim.BaseTool
+    qwen_tools_module.TOOL_REGISTRY = qwen_tool_shim.TOOL_REGISTRY
+
+
 def _load_module(
     module_name: str, module_path: Path, extra_paths: tuple[Path, ...] = ()
 ) -> ModuleType:
@@ -52,6 +82,7 @@ def load_shopping_agent_class() -> type:
 
 
 def load_travel_agent_class() -> type:
+    _install_qwen_tool_shim()
     module = _load_module(
         "deepplanning_vendor_travel_agent",
         TRAVEL_ROOT / "agent" / "tools_fn_agent.py",

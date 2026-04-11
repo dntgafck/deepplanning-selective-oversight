@@ -37,7 +37,11 @@ class ConversationState:
     overseer_tokens_in: int = 0
     overseer_tokens_out: int = 0
     tool_calls_history: list[dict[str, Any]] = field(default_factory=list)
+    tool_call_count: int = 0
     triggers_fired: list[dict[str, Any]] = field(default_factory=list)
+    final_stop_reason: str | None = None
+    final_output_present: bool = False
+    max_steps_hit: bool = False
     start_time: float = 0.0
     end_time: float = 0.0
 
@@ -75,6 +79,7 @@ class ConversationState:
         )
 
     def record_tool_call(self, tool_call: dict[str, Any], result: Any) -> None:
+        self.tool_call_count += 1
         self.tool_calls_history.append(
             {
                 "tool_name": tool_call.get("name"),
@@ -82,6 +87,13 @@ class ConversationState:
                 "result_summary": _summarize_result(result),
             }
         )
+
+    def record_final_outcome(
+        self, *, stop_reason: str, output: str | None, max_steps_hit: bool
+    ) -> None:
+        self.final_stop_reason = stop_reason
+        self.final_output_present = bool(output)
+        self.max_steps_hit = max_steps_hit
 
     @property
     def wall_time_seconds(self) -> float:
@@ -102,7 +114,11 @@ class ConversationState:
             "overseer_calls": self.overseer_calls,
             "overseer_tokens_in": self.overseer_tokens_in,
             "overseer_tokens_out": self.overseer_tokens_out,
+            "tool_call_count": self.tool_call_count,
             "tool_calls_history": self.tool_calls_history,
             "triggers_fired": self.triggers_fired,
+            "final_stop_reason": self.final_stop_reason,
+            "final_output_present": self.final_output_present,
+            "max_steps_hit": self.max_steps_hit,
             "wall_time_seconds": self.wall_time_seconds,
         }

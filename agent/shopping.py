@@ -22,6 +22,24 @@ def get_system_prompt(level: int) -> str:
     return load_shopping_prompt(level)
 
 
+def _executor_reasoning_enabled(system_config: Any) -> bool | None:
+    return False if getattr(system_config, "name", None) == "A" else None
+
+
+def _collect_tool_call_parse_warnings(assistant_message: Any) -> list[str]:
+    warnings: list[str] = []
+    for index, tool_call in enumerate(
+        getattr(assistant_message, "tool_calls", None) or []
+    ):
+        try:
+            function = tool_call.function
+            _ = function.name
+            _ = function.arguments
+        except Exception as exc:
+            warnings.append(f"tool_calls[{index}] skipped: {exc}")
+    return warnings
+
+
 def _assistant_message_to_dict(msg: Any, calls: list[dict[str, Any]]) -> dict[str, Any]:
     message = {
         "role": "assistant",
@@ -50,6 +68,36 @@ def _extract_final_output(messages: list[Any]) -> str:
         if isinstance(message, dict) and message.get("role") == "assistant":
             return str(message.get("content") or "")
     return ""
+
+
+def _resolve_run_database_dir(
+    base_database_dir: Path,
+    run_id: int,
+    database_dir_by_run: dict[int, Path] | None,
+    runs: int,
+) -> Path:
+    if database_dir_by_run is not None:
+        return database_dir_by_run[run_id]
+    if runs > 1:
+        raise ValueError(
+            "Shopping multi-run execution requires per-run database directories."
+        )
+    return base_database_dir
+
+
+def _resolve_run_output_dir(
+    base_output_dir: Path | None,
+    run_id: int,
+    output_dir_by_run: dict[int, Path] | None,
+    runs: int,
+) -> Path | None:
+    if output_dir_by_run is not None:
+        return output_dir_by_run[run_id]
+    if base_output_dir is None:
+        return None
+    if runs > 1:
+        return base_output_dir / f"run_{run_id}"
+    return base_output_dir
 
 
 class ShoppingAgentRunner(VendorShoppingFnAgent):
@@ -88,7 +136,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         if save_messages and messages_file is not None:
             self._save_messages(messages, messages_file, 0, "Initial messages")
 
-        messages = await self._run_phase(
+        messages, _ = await self._run_phase(
             messages=messages,
             state=state,
             system_config=system_config,
@@ -100,7 +148,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             messages_file=messages_file,
         )
         messages = self._add_to_cart(messages)
-        messages = await self._run_phase(
+        messages, phase_stop_reason = await self._run_phase(
             messages=messages,
             state=state,
             system_config=system_config,
@@ -112,11 +160,22 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             messages_file=messages_file,
         )
 
+        final_output = _extract_final_output(messages)
+        final_stop_reason = (
+            "no_tool_calls"
+            if phase_stop_reason == "no_tool_calls"
+            else "max_steps_exhausted"
+        )
+        state.record_final_outcome(
+            stop_reason=final_stop_reason,
+            output=final_output,
+            max_steps_hit=phase_stop_reason != "no_tool_calls",
+        )
         state.finish()
         return TaskResult(
             task_id=state.task_id,
             run_id=run_id,
-            output=_extract_final_output(messages),
+            output=final_output,
             messages=messages,
             state=state,
         )
@@ -132,33 +191,23 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         stop_on_no_calls: bool,
         save_messages: bool,
         messages_file: Path | None,
-    ) -> list[Any]:
+    ) -> tuple[list[Any], str]:
         for step_count in range(1, system_config.max_steps + 1):
+            request_messages = list(messages)
+            started_at = time.time()
             response = await call_chat_completion(
                 provider=system_config.executor_provider,
-                messages=messages,
+                messages=request_messages,
                 tools=self.openai_tools,
+                reasoning_enabled=_executor_reasoning_enabled(system_config),
             )
+            ended_at = time.time()
             state.record_executor_call(response)
 
             prompt_tokens, completion_tokens = extract_usage_tokens(response)
-            if logger is not None:
-                await logger.log_event(
-                    "llm_call",
-                    {
-                        "domain": "shopping",
-                        "phase": phase_name,
-                        "task_id": state.task_id,
-                        "run_id": run_id,
-                        "step": step_count,
-                        "model": system_config.executor_provider.alias,
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                    },
-                )
-
             assistant_message = response.choices[0].message
             calls = self._detect_tool_calls(assistant_message)
+            parse_warnings = _collect_tool_call_parse_warnings(assistant_message)
 
             if calls and system_config.oversight_enabled:
                 action = evaluate_oversight(response, messages, state, system_config)
@@ -186,6 +235,9 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     )
                     assistant_message = response.choices[0].message
                     calls = self._detect_tool_calls(assistant_message)
+                    parse_warnings = _collect_tool_call_parse_warnings(
+                        assistant_message
+                    )
 
             assistant_payload = _assistant_message_to_dict(assistant_message, calls)
             messages.append(assistant_payload)
@@ -197,27 +249,39 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     f"LLM response ({phase_name}) - {len(calls)} tool calls",
                 )
 
+            tool_results: list[dict[str, Any]] = []
             if not calls:
-                if stop_on_no_calls:
-                    return messages
-                break
+                if logger is not None:
+                    await logger.log_turn(
+                        domain="shopping",
+                        task_id=state.task_id,
+                        run_id=run_id,
+                        phase=phase_name,
+                        turn_index=step_count,
+                        started_at=started_at,
+                        ended_at=ended_at,
+                        request_messages=request_messages,
+                        raw_response=response,
+                        parsed_tool_calls=calls,
+                        parse_warnings=parse_warnings,
+                        tool_results=tool_results,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        stop_reason="no_tool_calls",
+                        model_alias=system_config.executor_provider.alias,
+                    )
+                return messages, "no_tool_calls" if stop_on_no_calls else "phase_break"
 
             for call in calls:
                 tool_result = self._exec_tool(call["name"], call["arguments"])
                 state.record_tool_call(call, tool_result)
-                if logger is not None:
-                    await logger.log_event(
-                        "tool_call",
-                        {
-                            "domain": "shopping",
-                            "task_id": state.task_id,
-                            "run_id": run_id,
-                            "step": step_count,
-                            "tool_name": call["name"],
-                            "tool_call_id": call["id"],
-                            "result_preview": tool_result[:160],
-                        },
-                    )
+                tool_results.append(
+                    {
+                        "tool_name": call["name"],
+                        "tool_call_id": call["id"],
+                        "content": tool_result,
+                    }
+                )
                 messages.append(
                     {
                         "role": "tool",
@@ -232,8 +296,27 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     step_count,
                     f"Tool execution ({phase_name}) - {len(calls)} tools",
                 )
+            if logger is not None:
+                await logger.log_turn(
+                    domain="shopping",
+                    task_id=state.task_id,
+                    run_id=run_id,
+                    phase=phase_name,
+                    turn_index=step_count,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    request_messages=request_messages,
+                    raw_response=response,
+                    parsed_tool_calls=calls,
+                    parse_warnings=parse_warnings,
+                    tool_results=tool_results,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    stop_reason="tool_calls",
+                    model_alias=system_config.executor_provider.alias,
+                )
 
-        return messages
+        return messages, "max_steps_exhausted"
 
 
 async def run_agent_inference_async(
@@ -242,10 +325,14 @@ async def run_agent_inference_async(
     database_dir: Path,
     tool_schema_path: Path,
     system_prompt: str,
+    output_dir: Path | None = None,
     workers: int = 10,
     max_llm_calls: int = 100,
+    runs: int = 1,
     rerun_ids: list[int] | None = None,
     system: str = "A",
+    database_dir_by_run: dict[int, Path] | None = None,
+    output_dir_by_run: dict[int, Path] | None = None,
 ) -> dict[str, Any]:
     with test_data_path.open("r", encoding="utf-8") as fh:
         test_data = json.load(fh)
@@ -276,13 +363,35 @@ async def run_agent_inference_async(
     print(f"Workers: {workers}")
     print(f"{'=' * 80}\n")
 
-    logger = StructuredLogger(database_dir)
     system_config = build_system_config(
         system_name=system,
         executor_model=model,
         max_steps=max_llm_calls,
+        num_runs=runs,
     )
     started_at = time.time()
+    loggers: dict[int, StructuredLogger] = {}
+
+    def resolve_run_database_dir(run_id: int) -> Path:
+        return _resolve_run_database_dir(
+            database_dir, run_id, database_dir_by_run, runs
+        )
+
+    def resolve_run_output_dir(run_id: int) -> Path | None:
+        run_output_dir = _resolve_run_output_dir(
+            output_dir,
+            run_id,
+            output_dir_by_run,
+            runs,
+        )
+        if run_output_dir is not None:
+            run_output_dir.mkdir(parents=True, exist_ok=True)
+        return run_output_dir
+
+    def get_logger(run_id: int) -> StructuredLogger:
+        if run_id not in loggers:
+            loggers[run_id] = StructuredLogger(resolve_run_output_dir(run_id))
+        return loggers[run_id]
 
     async def process_sample(sample: object, run_id: int) -> dict[str, Any]:
         sample = dict(sample)
@@ -296,10 +405,12 @@ async def run_agent_inference_async(
         )
 
         try:
+            run_database_dir = resolve_run_database_dir(run_id)
+            logger = get_logger(run_id)
             runner = ShoppingAgentRunner(
                 model=system_config.executor_provider.alias,
                 sample_id=sample_id,
-                database_base_path=str(database_dir),
+                database_base_path=str(run_database_dir),
                 tool_schema_path=str(tool_schema_path),
             )
             result = await runner.run_task(
@@ -351,7 +462,7 @@ async def run_agent_inference_async(
             }
 
     raw_results = await run_experiment(
-        test_data, process_sample, parallel=workers, runs=1
+        test_data, process_sample, parallel=workers, runs=runs
     )
     results: list[dict[str, Any]] = []
     for item in raw_results:
@@ -366,6 +477,7 @@ async def run_agent_inference_async(
         "success": success_count,
         "failed": len(results) - success_count,
         "elapsed_time": time.time() - started_at,
+        "runs": runs,
         "results": results,
     }
 
@@ -376,10 +488,14 @@ def run_agent_inference(
     database_dir: Path,
     tool_schema_path: Path,
     system_prompt: str,
+    output_dir: Path | None = None,
     workers: int = 10,
     max_llm_calls: int = 100,
+    runs: int = 1,
     rerun_ids: list[int] | None = None,
     system: str = "A",
+    database_dir_by_run: dict[int, Path] | None = None,
+    output_dir_by_run: dict[int, Path] | None = None,
 ) -> dict[str, Any]:
     return asyncio.run(
         run_agent_inference_async(
@@ -388,9 +504,13 @@ def run_agent_inference(
             database_dir=database_dir,
             tool_schema_path=tool_schema_path,
             system_prompt=system_prompt,
+            output_dir=output_dir,
             workers=workers,
             max_llm_calls=max_llm_calls,
+            runs=runs,
             rerun_ids=rerun_ids,
             system=system,
+            database_dir_by_run=database_dir_by_run,
+            output_dir_by_run=output_dir_by_run,
         )
     )
