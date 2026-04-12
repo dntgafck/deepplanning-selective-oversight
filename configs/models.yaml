@@ -8,7 +8,7 @@ models:
       reasoning:
         enabled: false
     max_retries: 30
-    backoff: 1.5        
+    backoff: 1.5
 
   deepseek-v3.2:
     model_name: deepseek/deepseek-v3.2
