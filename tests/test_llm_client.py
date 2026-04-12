@@ -235,6 +235,70 @@ def test_call_chat_completion_normalizes_message_objects(monkeypatch):
     ]
 
 
+def test_call_chat_completion_forwards_temperature_for_explicit_model_config(
+    monkeypatch,
+):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+    provider = llm_client.ProviderConfig(
+        alias="alias",
+        model="openai/o3",
+        temperature=0.2,
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=provider,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert captured_params[0]["temperature"] == 0.2
+
+
+def test_call_chat_completion_preserves_model_config_reasoning_when_unset(
+    monkeypatch,
+):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+    provider = llm_client.ProviderConfig(
+        alias="qwen3.5-9b",
+        model="qwen/qwen3.5-9b",
+        provider="openai",
+        extra_body={"reasoning": {"enabled": True}, "seed": 7},
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=provider,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert captured_params[0]["extra_body"] == {
+        "reasoning": {"enabled": True},
+        "seed": 7,
+    }
+
+
 def test_call_chat_completion_retries_only_transport_errors(monkeypatch):
     attempts = 0
 
@@ -529,39 +593,6 @@ def test_serialize_exception_redacts_sensitive_request_headers():
         headers.get("X-Api-Key") == "<redacted>"
         or headers.get("x-api-key") == "<redacted>"
     )
-
-
-def test_call_chat_completion_forces_reasoning_override(monkeypatch):
-    captured_params: list[dict[str, object]] = []
-
-    async def fake_create(**kwargs):
-        captured_params.append(kwargs)
-        return FakeResponse(content="done")
-
-    monkeypatch.setattr(
-        llm_client,
-        "_build_async_client",
-        lambda provider, api_key: FakeAsyncClient(fake_create),
-    )
-    provider = llm_client.ProviderConfig(
-        alias="qwen3-14b",
-        model="qwen/qwen3-14b",
-        provider="openai",
-        extra_body={"reasoning": {"enabled": True}, "seed": 7},
-    )
-
-    asyncio.run(
-        llm_client.call_chat_completion(
-            provider=provider,
-            messages=[{"role": "user", "content": "hello"}],
-            reasoning_enabled=False,
-        )
-    )
-
-    assert captured_params[0]["extra_body"] == {
-        "reasoning": {"enabled": False},
-        "seed": 7,
-    }
 
 
 def test_flush_langfuse_noop_without_keys(monkeypatch):

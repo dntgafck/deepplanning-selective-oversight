@@ -149,3 +149,9 @@ def failure_subtype_from_stop_reason(stop_reason: str | None) -> FailureSubtype:
     if stop_reason == "max_steps_exhausted":
         return FAILURE_SUBTYPE_MAX_TOOL_CALLS
     return FAILURE_SUBTYPE_NONE
+
+
+def observation_valid_for_failure_subtype(
+    failure_subtype: FailureSubtype | str | None,
+) -> bool:
+    return failure_subtype != FAILURE_SUBTYPE_INFRA_TRANSIENT

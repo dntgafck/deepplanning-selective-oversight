@@ -133,6 +133,11 @@ def _build_sample_statuses(
             if task_result is not None and "success" in task_result
             else trajectory_path.exists()
         )
+        observation_valid = (
+            bool(task_result.get("observation_valid", True))
+            if task_result is not None
+            else trajectory_path.exists()
+        )
         report_generated = report_path.exists()
         final_output_present = (
             bool(task_result.get("final_output_present"))
@@ -182,6 +187,7 @@ def _build_sample_statuses(
             metrics_excerpt = {
                 "success": task_result.get("success"),
                 "failure_subtype": task_result.get("failure_subtype"),
+                "observation_valid": task_result.get("observation_valid"),
                 "executor_calls": task_result.get("executor_calls"),
                 "tool_call_count": task_result.get("tool_call_count"),
                 "final_stop_reason": task_result.get("final_stop_reason"),
@@ -195,6 +201,7 @@ def _build_sample_statuses(
                 "inference_complete": inference_complete,
                 "inference_success": inference_success,
                 "failure_subtype": failure_subtype,
+                "observation_valid": observation_valid,
                 "report_generated": report_generated,
                 "final_output_present": final_output_present,
                 "conversion_status": conversion_status,
@@ -362,6 +369,7 @@ def run_language(
             output_dir=output_dir,
             workers=int(cfg.workers),
             max_llm_calls=int(cfg.max_llm_calls),
+            infra_retry_limit=int(getattr(cfg, "infra_retry_limit", 2)),
             runs=runs,
             system=system,
             output_dir_by_run=run_output_dirs,
@@ -470,6 +478,7 @@ def run(
     system: str = "A",
     workers: int = 50,
     max_llm_calls: int = 400,
+    infra_retry_limit: int = 2,
     runs: int = 4,
     start_from: str = "inference",
     evaluation_mode: str = "auto",
@@ -494,6 +503,7 @@ def run(
             "start_from": start_from,
             "workers": workers,
             "max_llm_calls": max_llm_calls,
+            "infra_retry_limit": infra_retry_limit,
             "verbose": verbose,
             "debug": debug,
             "evaluation_mode": evaluation_mode,

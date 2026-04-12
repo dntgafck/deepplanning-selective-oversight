@@ -103,6 +103,12 @@ def _legacy_kwargs_to_public_overrides(kwargs: dict[str, Any]) -> list[str]:
     if _has_value(max_llm_calls):
         overrides.append(f"runtime.max_llm_calls={hydra_value(int(max_llm_calls))}")
 
+    infra_retry_limit = resolved.pop("infra_retry_limit", None)
+    if _has_value(infra_retry_limit):
+        overrides.append(
+            f"runtime.infra_retry_limit={hydra_value(int(infra_retry_limit))}"
+        )
+
     runs = resolved.pop("runs", None)
     if _has_value(runs):
         overrides.append(f"runtime.runs={hydra_value(int(runs))}")
@@ -284,6 +290,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             system=system_name,
             workers=int(runtime_cfg.get("workers", 20)),
             max_llm_calls=int(runtime_cfg.get("max_llm_calls", 400)),
+            infra_retry_limit=int(runtime_cfg.get("infra_retry_limit", 2)),
             runs=int(runtime_cfg.get("runs", 1)),
             output_root=output_root / "shopping",
             langfuse_session_id=langfuse_session_id,
@@ -297,6 +304,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             system=system_name,
             workers=int(runtime_cfg.get("workers", 20)),
             max_llm_calls=int(runtime_cfg.get("max_llm_calls", 400)),
+            infra_retry_limit=int(runtime_cfg.get("infra_retry_limit", 2)),
             runs=int(runtime_cfg.get("runs", 1)),
             start_from=str(travel_cfg.get("start_from", "inference")),
             evaluation_mode=str(travel_cfg.get("evaluation_mode", "auto")),

@@ -203,22 +203,16 @@ def test_travel_runner_matches_benchmark_loop_and_logs_turns(monkeypatch, tmp_pa
     assert state.executor_calls == 2
     assert state.final_stop_reason == "no_tool_calls"
     assert state.final_output_present is True
-    assert captured_calls[0]["reasoning_enabled"] is False
-    assert captured_calls[1]["reasoning_enabled"] is False
-    assert captured_calls[1]["messages"][2] == {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "id": "call_1",
-                "type": "function",
-                "function": {
-                    "name": "query_train_info",
-                    "arguments": '{"departure":"A","arrival":"B"}',
-                },
-            }
-        ],
-    }
+    assert "reasoning_enabled" not in captured_calls[0]
+    assert "reasoning_enabled" not in captured_calls[1]
+    assistant_message = captured_calls[1]["messages"][2]
+    assert assistant_message.role == "assistant"
+    assert assistant_message.content == ""
+    assert assistant_message.tool_calls[0].id == "call_1"
+    assert assistant_message.tool_calls[0].function.name == "query_train_info"
+    assert assistant_message.tool_calls[0].function.arguments == (
+        '{"departure":"A","arrival":"B"}'
+    )
     assert any(
         isinstance(message, dict)
         and message.get("role") == "tool"
@@ -327,10 +321,10 @@ def test_travel_runner_stops_immediately_on_no_tool_response(monkeypatch):
     assert result.output == "Day 1 itinerary"
     assert state.executor_calls == 1
     assert state.final_stop_reason == "no_tool_calls"
-    assert result.messages[-1] == {
-        "role": "assistant",
-        "content": "<think>reasoning</think><plan>Day 1 itinerary</plan>",
-    }
+    assert result.messages[-1].role == "assistant"
+    assert result.messages[-1].content == (
+        "<think>reasoning</think><plan>Day 1 itinerary</plan>"
+    )
 
 
 def test_shopping_runner_breaks_phase_one_and_adds_cart_message(monkeypatch, tmp_path):
@@ -387,8 +381,8 @@ def test_shopping_runner_breaks_phase_one_and_adds_cart_message(monkeypatch, tmp
     assert result.output == "Cart verified."
     assert state.executor_calls == 2
     assert state.final_stop_reason == "no_tool_calls"
-    assert captured_calls[0]["reasoning_enabled"] is False
-    assert captured_calls[1]["reasoning_enabled"] is False
+    assert "reasoning_enabled" not in captured_calls[0]
+    assert "reasoning_enabled" not in captured_calls[1]
     assert any(
         isinstance(message, dict)
         and message.get("role") == "user"
@@ -464,8 +458,8 @@ def test_shopping_runner_gives_phase_two_a_fresh_budget_and_omits_tool_name(
     assert result.output == "Cart verified."
     assert state.executor_calls == 2
     assert state.tool_call_count == 1
-    assert captured_calls[0]["reasoning_enabled"] is False
-    assert captured_calls[1]["reasoning_enabled"] is False
+    assert "reasoning_enabled" not in captured_calls[0]
+    assert "reasoning_enabled" not in captured_calls[1]
     assert any(
         isinstance(message, dict)
         and message.get("role") == "tool"
@@ -638,8 +632,10 @@ def test_shopping_run_agent_inference_logs_structured_task_error(monkeypatch, tm
     assert records[0]["error"]["type"] == "RuntimeError"
     assert records[0]["error"]["message"] == "shopping boom"
     assert "shopping boom" in records[0]["error"]["traceback"]
+    assert records[0]["observation_valid"] is True
     assert task_results[0]["success"] is False
     assert task_results[0]["failure_subtype"] == "none"
+    assert task_results[0]["observation_valid"] is True
     assert task_results[0]["error"]["message"] == "shopping boom"
 
 
@@ -692,7 +688,84 @@ def test_shopping_run_agent_inference_records_max_tool_calls_failure_subtype(
     task_results = _load_jsonl(output_dir / "task_results.jsonl")
     assert task_results[0]["success"] is True
     assert task_results[0]["failure_subtype"] == "max_tool_calls"
+    assert task_results[0]["observation_valid"] is True
     assert task_results[0]["final_stop_reason"] == "max_steps_exhausted"
+
+
+def test_shopping_run_agent_inference_retries_infra_and_restores_case_state(
+    monkeypatch, tmp_path
+):
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text(
+        json.dumps([{"id": 1, "query": "test shopping query", "level": 1}]),
+        encoding="utf-8",
+    )
+
+    run_database_dir = tmp_path / "shopping_db"
+    case_dir = run_database_dir / "case_1"
+    case_dir.mkdir(parents=True)
+    (case_dir / "cart.json").write_text("{}", encoding="utf-8")
+
+    marker_presence: list[bool] = []
+
+    class FakeShoppingRunner:
+        def __init__(self, **kwargs) -> None:
+            self.database_base_path = Path(kwargs["database_base_path"])
+
+        async def run_task(self, **kwargs):
+            sample_case_dir = self.database_base_path / "case_1"
+            marker = sample_case_dir / "attempt_marker.txt"
+            marker_presence.append(marker.exists())
+            if len(marker_presence) == 1:
+                marker.write_text("mutated", encoding="utf-8")
+                raise OSError("socket reset by peer")
+
+            state = kwargs["state"]
+            state.begin()
+            state.record_final_outcome(
+                stop_reason="no_tool_calls",
+                output="Recovered cart",
+                max_steps_hit=False,
+            )
+            state.finish()
+            return shopping_module.TaskResult(
+                task_id=state.task_id,
+                run_id=kwargs["run_id"],
+                output="Recovered cart",
+                messages=[],
+                state=state,
+            )
+
+    monkeypatch.setattr(shopping_module, "ShoppingAgentRunner", FakeShoppingRunner)
+
+    output_dir = tmp_path / "shopping_logs"
+    results = shopping_module.run_agent_inference(
+        model="qwen-plus",
+        test_data_path=test_data_path,
+        database_dir=run_database_dir,
+        tool_schema_path=tmp_path / "shopping_tool_schema.json",
+        system_prompt=shopping_module.get_system_prompt(1),
+        output_dir=output_dir,
+        workers=1,
+        max_llm_calls=2,
+        infra_retry_limit=1,
+        system="A",
+    )
+
+    assert marker_presence == [False, False]
+    assert results["total"] == 1
+    assert results["success"] == 1
+    assert results["failed"] == 0
+    assert results["invalid"] == 0
+    records = _load_jsonl(output_dir / "agent_events.jsonl")
+    task_results = _load_jsonl(output_dir / "task_results.jsonl")
+    assert [record["event_type"] for record in records] == ["task_invalid_attempt"]
+    assert records[0]["failure_subtype"] == "infra_transient"
+    assert records[0]["observation_valid"] is False
+    assert len(task_results) == 1
+    assert task_results[0]["success"] is True
+    assert task_results[0]["observation_valid"] is True
+    assert not (case_dir / "attempt_marker.txt").exists()
 
 
 def test_shopping_run_agent_inference_prints_per_run_progress(
@@ -999,9 +1072,125 @@ def test_travel_run_agent_inference_logs_structured_task_error(monkeypatch, tmp_
     assert records[0]["error"]["type"] == "RuntimeError"
     assert records[0]["error"]["message"] == "travel boom"
     assert "travel boom" in records[0]["error"]["traceback"]
+    assert records[0]["observation_valid"] is True
     assert task_results[0]["success"] is False
     assert task_results[0]["failure_subtype"] == "none"
+    assert task_results[0]["observation_valid"] is True
     assert task_results[0]["error"]["message"] == "travel boom"
+
+
+def test_travel_run_agent_inference_marks_exhausted_infra_as_invalid(
+    monkeypatch, tmp_path
+):
+    test_data_path = tmp_path / "travel_samples.json"
+    test_data_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": 0,
+                    "query": "test travel query",
+                    "meta_info": {"days": 2},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    attempts = 0
+
+    class FakeTravelRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise OSError("provider disconnected")
+
+    monkeypatch.setattr(travel_module, "TravelAgentRunner", FakeTravelRunner)
+
+    output_dir = tmp_path / "travel_output"
+    results = travel_module.run_agent_inference(
+        model="qwen-plus",
+        language="en",
+        test_data_path=test_data_path,
+        database_dir=TRAVEL_DATABASE_DIR,
+        tool_schema_path=TRAVEL_SCHEMA_PATH,
+        output_dir=output_dir,
+        workers=1,
+        max_llm_calls=1,
+        infra_retry_limit=1,
+        system="A",
+    )
+
+    assert attempts == 2
+    assert results["total"] == 0
+    assert results["success"] == 0
+    assert results["failed"] == 0
+    assert results["invalid"] == 1
+    assert results["results"][0]["failure_subtype"] == "infra_transient"
+    assert results["results"][0]["observation_valid"] is False
+    records = _load_jsonl(output_dir / "agent_events.jsonl")
+    task_results = _load_jsonl(output_dir / "task_results.jsonl")
+    assert [record["event_type"] for record in records] == [
+        "task_invalid_attempt",
+        "task_error",
+    ]
+    assert task_results[0]["failure_subtype"] == "infra_transient"
+    assert task_results[0]["observation_valid"] is False
+
+
+def test_travel_run_agent_inference_does_not_retry_context_exhaustion(
+    monkeypatch, tmp_path
+):
+    test_data_path = tmp_path / "travel_samples.json"
+    test_data_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": 0,
+                    "query": "test travel query",
+                    "meta_info": {"days": 2},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    attempts = 0
+
+    class FakeTravelRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("maximum context length exceeded for this model")
+
+    monkeypatch.setattr(travel_module, "TravelAgentRunner", FakeTravelRunner)
+
+    output_dir = tmp_path / "travel_output"
+    results = travel_module.run_agent_inference(
+        model="qwen-plus",
+        language="en",
+        test_data_path=test_data_path,
+        database_dir=TRAVEL_DATABASE_DIR,
+        tool_schema_path=TRAVEL_SCHEMA_PATH,
+        output_dir=output_dir,
+        workers=1,
+        max_llm_calls=1,
+        infra_retry_limit=3,
+        system="A",
+    )
+
+    assert attempts == 1
+    assert results["total"] == 1
+    assert results["failed"] == 1
+    assert results["invalid"] == 0
+    task_results = _load_jsonl(output_dir / "task_results.jsonl")
+    assert task_results[0]["failure_subtype"] == "context_exhaustion"
+    assert task_results[0]["observation_valid"] is True
 
 
 def test_travel_run_agent_inference_serializes_tool_calls_in_trajectory(
@@ -1621,6 +1810,43 @@ def test_travel_wrapper_writes_generated_data_only_summary_on_conversion_failure
     assert fallback["mode"] == "generated_data_only"
     assert fallback["sample_statuses"][0]["conversion_status"] == "failed"
     assert fallback["sample_statuses"][0]["evaluation_status"] == "generated_data_only"
+
+
+def test_travel_sample_statuses_include_observation_valid(tmp_path):
+    test_data_path = tmp_path / "travel_samples.json"
+    test_data_path.write_text(
+        json.dumps([{"id": 0, "query": "test travel query"}]),
+        encoding="utf-8",
+    )
+
+    run_output_dir = tmp_path / "travel_run"
+    run_output_dir.mkdir()
+    (run_output_dir / "task_results.jsonl").write_text(
+        json.dumps(
+            {
+                "task_id": "id_0",
+                "run_id": 0,
+                "success": False,
+                "failure_subtype": "infra_transient",
+                "observation_valid": False,
+                "final_output_present": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    statuses = travel_runtime_module._build_sample_statuses(
+        test_data_path=test_data_path,
+        run_output_dir=run_output_dir,
+        conversion_results=None,
+        evaluation_results=None,
+        fallback_active=False,
+    )
+
+    assert statuses[0]["failure_subtype"] == "infra_transient"
+    assert statuses[0]["observation_valid"] is False
+    assert statuses[0]["task_metrics"]["observation_valid"] is False
 
 
 def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):

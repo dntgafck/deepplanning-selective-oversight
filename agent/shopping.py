@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import time
 import traceback
 from datetime import datetime
@@ -12,8 +13,10 @@ from experiment import StructuredLogger, build_system_config, run_experiment
 from experiment.logging import serialize_exception
 from experiment.progress import InferenceProgressReporter
 from failure_subtypes import (
+    FAILURE_SUBTYPE_INFRA_TRANSIENT,
     classify_exception_failure_subtype,
     failure_subtype_from_stop_reason,
+    observation_valid_for_failure_subtype,
 )
 from llm import (
     build_langfuse_trace_id,
@@ -31,14 +34,11 @@ from .vendor import (
 )
 
 VendorShoppingFnAgent = load_shopping_agent_class()
+DEFAULT_INFRA_RETRY_LIMIT = 2
 
 
 def get_system_prompt(level: int) -> str:
     return load_shopping_prompt(level)
-
-
-def _executor_reasoning_enabled(system_config: Any) -> bool | None:
-    return False if getattr(system_config, "name", None) == "A" else None
 
 
 def _collect_tool_call_parse_warnings(assistant_message: Any) -> list[str]:
@@ -119,6 +119,42 @@ def _error_summary(error_payload: dict[str, Any]) -> str:
     error_type = error_payload.get("type", "Error")
     message = str(error_payload.get("message", "")).strip()
     return f"{error_type}: {message}" if message else str(error_type)
+
+
+def _prepare_case_retry_snapshot(
+    run_database_dir: Path,
+    sample_id: str,
+) -> tuple[Path, Path] | None:
+    case_dir = run_database_dir / f"case_{sample_id}"
+    if not case_dir.exists():
+        return None
+
+    snapshot_root = run_database_dir.parent / ".retry_snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    snapshot_dir = snapshot_root / f"case_{sample_id}"
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
+    shutil.copytree(case_dir, snapshot_dir)
+    return case_dir, snapshot_dir
+
+
+def _restore_case_retry_snapshot(snapshot: tuple[Path, Path] | None) -> None:
+    if snapshot is None:
+        return
+
+    case_dir, snapshot_dir = snapshot
+    if case_dir.exists():
+        shutil.rmtree(case_dir)
+    shutil.copytree(snapshot_dir, case_dir)
+
+
+def _cleanup_case_retry_snapshot(snapshot: tuple[Path, Path] | None) -> None:
+    if snapshot is None:
+        return
+
+    _, snapshot_dir = snapshot
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
 
 
 class ShoppingAgentRunner(VendorShoppingFnAgent):
@@ -266,7 +302,6 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 provider=system_config.executor_provider,
                 messages=request_messages,
                 tools=self.openai_tools,
-                reasoning_enabled=_executor_reasoning_enabled(system_config),
                 on_attempt_error=log_attempt_error,
                 trace_id=trace_id,
                 session_id=session_id,
@@ -399,6 +434,7 @@ async def run_agent_inference_async(
     workers: int = 10,
     max_llm_calls: int = 100,
     runs: int = 1,
+    infra_retry_limit: int = DEFAULT_INFRA_RETRY_LIMIT,
     rerun_ids: list[int] | None = None,
     system: str = "A",
     database_dir_by_run: dict[int, Path] | None = None,
@@ -423,6 +459,7 @@ async def run_agent_inference_async(
                 "total": 0,
                 "success": 0,
                 "failed": 0,
+                "invalid": 0,
                 "elapsed_time": 0,
                 "results": [],
             }
@@ -434,6 +471,7 @@ async def run_agent_inference_async(
     print(f"Samples: {len(test_data)}")
     print(f"Runs: {runs}")
     print(f"Workers: {workers}")
+    print(f"Infra retry limit: {infra_retry_limit}")
     progress = InferenceProgressReporter(
         domain="shopping",
         samples_per_run=len(test_data),
@@ -476,120 +514,166 @@ async def run_agent_inference_async(
         sample = dict(sample)
         sample_id = str(sample.get("id", "unknown"))
         query = str(sample.get("query", ""))
-        state = ConversationState(
-            task_id=sample_id,
-            domain="shopping",
-            complexity=int(sample.get("level", 0) or 0) or None,
-            system_config_name=system,
+        run_database_dir = resolve_run_database_dir(run_id)
+        logger = get_logger(run_id)
+        sample_trace_id = trace_id or build_langfuse_trace_id(
+            session_id,
+            "shopping",
+            model,
+            run_id,
+            sample_id,
         )
-        logger: StructuredLogger | None = None
+        case_snapshot = (
+            _prepare_case_retry_snapshot(run_database_dir, sample_id)
+            if infra_retry_limit > 0
+            else None
+        )
 
         try:
-            run_database_dir = resolve_run_database_dir(run_id)
-            logger = get_logger(run_id)
-            sample_trace_id = trace_id or build_langfuse_trace_id(
-                session_id,
-                "shopping",
-                model,
-                run_id,
-                sample_id,
-            )
-            runner = ShoppingAgentRunner(
-                model=system_config.executor_provider.alias,
-                sample_id=sample_id,
-                database_base_path=str(run_database_dir),
-                tool_schema_path=str(tool_schema_path),
-            )
-            result = await runner.run_task(
-                user_query=query,
-                system_prompt=system_prompt,
-                state=state,
-                system_config=system_config,
-                logger=logger,
-                run_id=run_id,
-                save_messages=True,
-                sample_id=sample_id,
-                trace_id=sample_trace_id,
-                session_id=session_id,
-            )
-            failure_subtype = failure_subtype_from_stop_reason(
-                result.state.final_stop_reason
-            )
-            await logger.log_result(
-                {
-                    **result.state.to_metrics(),
-                    "task_id": sample_id,
-                    "run_id": run_id,
-                    "system": system,
-                    "domain": "shopping",
-                    "success": True,
-                    "failure_subtype": failure_subtype,
-                    "final_output": result.output,
-                }
-            )
-            await progress.record_completion(
-                run_id=run_id,
-                sample_id=sample_id,
-                success=True,
-                elapsed_seconds=state.wall_time_seconds,
-            )
-            return {
-                "id": sample_id,
-                "query": query,
-                "model": model,
-                "messages": result.messages,
-                "elapsed_time": state.wall_time_seconds,
-                "success": True,
-                "failure_subtype": failure_subtype,
-            }
-        except Exception as exc:
-            if not state.end_time:
-                state.finish()
-            error_payload = serialize_exception(exc)
-            failure_subtype = classify_exception_failure_subtype(exc)
-            if logger is None:
-                try:
-                    logger = get_logger(run_id)
-                except Exception:
-                    logger = None
-            if logger is not None:
-                await logger.log_event(
-                    "task_error",
-                    {
-                        "domain": "shopping",
-                        "task_id": sample_id,
-                        "run_id": run_id,
-                        "failure_subtype": failure_subtype,
-                        "error": error_payload,
-                    },
+            max_attempts = max(int(infra_retry_limit), 0) + 1
+            for attempt_number in range(1, max_attempts + 1):
+                if attempt_number > 1:
+                    _restore_case_retry_snapshot(case_snapshot)
+
+                state = ConversationState(
+                    task_id=sample_id,
+                    domain="shopping",
+                    complexity=int(sample.get("level", 0) or 0) or None,
+                    system_config_name=system,
                 )
-                await logger.log_result(
-                    {
-                        **state.to_metrics(),
-                        "task_id": sample_id,
-                        "run_id": run_id,
-                        "system": system,
-                        "domain": "shopping",
+
+                try:
+                    runner = ShoppingAgentRunner(
+                        model=system_config.executor_provider.alias,
+                        sample_id=sample_id,
+                        database_base_path=str(run_database_dir),
+                        tool_schema_path=str(tool_schema_path),
+                    )
+                    result = await runner.run_task(
+                        user_query=query,
+                        system_prompt=system_prompt,
+                        state=state,
+                        system_config=system_config,
+                        logger=logger,
+                        run_id=run_id,
+                        save_messages=True,
+                        sample_id=sample_id,
+                        trace_id=sample_trace_id,
+                        session_id=session_id,
+                    )
+                    failure_subtype = failure_subtype_from_stop_reason(
+                        result.state.final_stop_reason
+                    )
+                    observation_valid = observation_valid_for_failure_subtype(
+                        failure_subtype
+                    )
+                    await logger.log_result(
+                        {
+                            **result.state.to_metrics(),
+                            "task_id": sample_id,
+                            "run_id": run_id,
+                            "system": system,
+                            "domain": "shopping",
+                            "success": True,
+                            "failure_subtype": failure_subtype,
+                            "observation_valid": observation_valid,
+                            "final_output": result.output,
+                        }
+                    )
+                    await progress.record_completion(
+                        run_id=run_id,
+                        sample_id=sample_id,
+                        success=True,
+                        elapsed_seconds=state.wall_time_seconds,
+                    )
+                    return {
+                        "id": sample_id,
+                        "query": query,
+                        "model": model,
+                        "messages": result.messages,
+                        "elapsed_time": state.wall_time_seconds,
+                        "success": True,
+                        "failure_subtype": failure_subtype,
+                        "observation_valid": observation_valid,
+                    }
+                except Exception as exc:
+                    if not state.end_time:
+                        state.finish()
+                    error_payload = serialize_exception(exc)
+                    failure_subtype = classify_exception_failure_subtype(exc)
+                    observation_valid = observation_valid_for_failure_subtype(
+                        failure_subtype
+                    )
+                    should_retry = (
+                        failure_subtype == FAILURE_SUBTYPE_INFRA_TRANSIENT
+                        and attempt_number < max_attempts
+                    )
+                    if should_retry:
+                        print(
+                            "⚠️  Shopping sample invalid due to transient infrastructure error "
+                            f"(sample={sample_id}, run={run_id}, attempt={attempt_number}/{max_attempts}); "
+                            "retrying same seed/config."
+                        )
+                        await logger.log_event(
+                            "task_invalid_attempt",
+                            {
+                                "domain": "shopping",
+                                "task_id": sample_id,
+                                "run_id": run_id,
+                                "attempt": attempt_number,
+                                "max_attempts": max_attempts,
+                                "failure_subtype": failure_subtype,
+                                "observation_valid": False,
+                                "error": error_payload,
+                            },
+                        )
+                        continue
+
+                    if failure_subtype == FAILURE_SUBTYPE_INFRA_TRANSIENT:
+                        _restore_case_retry_snapshot(case_snapshot)
+
+                    await logger.log_event(
+                        "task_error",
+                        {
+                            "domain": "shopping",
+                            "task_id": sample_id,
+                            "run_id": run_id,
+                            "failure_subtype": failure_subtype,
+                            "observation_valid": observation_valid,
+                            "error": error_payload,
+                        },
+                    )
+                    await logger.log_result(
+                        {
+                            **state.to_metrics(),
+                            "task_id": sample_id,
+                            "run_id": run_id,
+                            "system": system,
+                            "domain": "shopping",
+                            "success": False,
+                            "failure_subtype": failure_subtype,
+                            "observation_valid": observation_valid,
+                            "final_output": None,
+                            "error": error_payload,
+                        }
+                    )
+                    await progress.record_completion(
+                        run_id=run_id,
+                        sample_id=sample_id,
+                        success=False,
+                        error_summary=_error_summary(error_payload),
+                    )
+                    traceback.print_exc()
+                    return {
+                        "id": sample_id,
+                        "query": query,
                         "success": False,
                         "failure_subtype": failure_subtype,
-                        "final_output": None,
-                        "error": error_payload,
+                        "observation_valid": observation_valid,
+                        "error": error_payload.get("message", str(exc)),
                     }
-                )
-            await progress.record_completion(
-                run_id=run_id,
-                sample_id=sample_id,
-                success=False,
-                error_summary=_error_summary(error_payload),
-            )
-            traceback.print_exc()
-            return {
-                "id": sample_id,
-                "query": query,
-                "success": False,
-                "failure_subtype": failure_subtype,
-                "error": error_payload.get("message", str(exc)),
-            }
+        finally:
+            _cleanup_case_retry_snapshot(case_snapshot)
 
     raw_results = await run_experiment(
         test_data, process_sample, parallel=workers, runs=runs
@@ -597,15 +681,26 @@ async def run_agent_inference_async(
     results: list[dict[str, Any]] = []
     for item in raw_results:
         if isinstance(item, Exception):
-            results.append({"success": False, "error": str(item)})
+            results.append(
+                {
+                    "success": False,
+                    "failure_subtype": "none",
+                    "observation_valid": True,
+                    "error": str(item),
+                }
+            )
         else:
             results.append(item)
 
-    success_count = sum(1 for result in results if result.get("success"))
+    observed_results = [
+        result for result in results if result.get("observation_valid", True)
+    ]
+    success_count = sum(1 for result in observed_results if result.get("success"))
     return {
-        "total": len(results),
+        "total": len(observed_results),
         "success": success_count,
-        "failed": len(results) - success_count,
+        "failed": len(observed_results) - success_count,
+        "invalid": len(results) - len(observed_results),
         "elapsed_time": time.time() - started_at,
         "runs": runs,
         "results": results,
@@ -622,6 +717,7 @@ def run_agent_inference(
     workers: int = 10,
     max_llm_calls: int = 100,
     runs: int = 1,
+    infra_retry_limit: int = DEFAULT_INFRA_RETRY_LIMIT,
     rerun_ids: list[int] | None = None,
     system: str = "A",
     database_dir_by_run: dict[int, Path] | None = None,
@@ -641,6 +737,7 @@ def run_agent_inference(
                 workers=workers,
                 max_llm_calls=max_llm_calls,
                 runs=runs,
+                infra_retry_limit=infra_retry_limit,
                 rerun_ids=rerun_ids,
                 system=system,
                 database_dir_by_run=database_dir_by_run,

@@ -34,11 +34,6 @@ def _langfuse_enabled() -> bool:
     return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
 
 
-def _is_reasoning_model(model_name: str) -> bool:
-    lowered = model_name.lower()
-    return any(token in lowered for token in ["o1", "o3", "o4-mini", "reasoner"])
-
-
 def _merge_reasoning(
     extra_body: dict[str, Any], reasoning_enabled: bool | None
 ) -> dict[str, Any]:
@@ -193,7 +188,7 @@ async def call_chat_completion(
     }
     if tools:
         params["tools"] = tools
-    if provider.temperature is not None and not _is_reasoning_model(provider.model):
+    if provider.temperature is not None:
         params["temperature"] = provider.temperature
 
     extra_body = _merge_reasoning(provider.extra_body, reasoning_enabled)
