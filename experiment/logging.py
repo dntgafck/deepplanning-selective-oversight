@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+SENSITIVE_HEADER_NAMES = {
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "cookie",
+    "set-cookie",
+}
 
 
 def _isoformat_utc(value: datetime) -> str:
@@ -75,6 +85,123 @@ def _to_jsonable(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return _to_jsonable(vars(value))
     return str(value)
+
+
+def _redact_headers(headers: Any) -> dict[str, Any]:
+    try:
+        items = dict(headers.items())
+    except Exception:
+        try:
+            items = dict(headers)
+        except Exception:
+            return {}
+
+    payload: dict[str, Any] = {}
+    for key, value in items.items():
+        if str(key).lower() in SENSITIVE_HEADER_NAMES:
+            payload[str(key)] = "<redacted>"
+        else:
+            payload[str(key)] = _to_jsonable(value)
+    return payload
+
+
+def _serialize_request(request: Any) -> dict[str, Any] | None:
+    if request is None:
+        return None
+
+    payload = {
+        "method": getattr(request, "method", None),
+        "url": str(getattr(request, "url", "")) or None,
+    }
+    headers = _redact_headers(getattr(request, "headers", None))
+    if headers:
+        payload["headers"] = headers
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _serialize_response_error(response: Any) -> dict[str, Any] | None:
+    if response is None:
+        return None
+
+    payload: dict[str, Any] = {
+        "status_code": getattr(response, "status_code", None),
+        "reason_phrase": getattr(response, "reason_phrase", None),
+        "url": str(getattr(response, "url", "")) or None,
+    }
+    headers = _redact_headers(getattr(response, "headers", None))
+    if headers:
+        payload["headers"] = headers
+
+    try:
+        json_body = response.json()
+    except Exception:
+        json_body = None
+    if json_body is not None:
+        payload["json_body"] = _to_jsonable(json_body)
+    else:
+        try:
+            text_body = response.text
+        except Exception:
+            text_body = None
+        if text_body:
+            payload["text_body"] = text_body[:4000]
+
+    request_payload = _serialize_request(getattr(response, "request", None))
+    if request_payload is not None:
+        payload["request"] = request_payload
+
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def serialize_exception(exc: BaseException) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": type(exc).__name__,
+        "module": type(exc).__module__,
+        "message": str(exc),
+        "repr": repr(exc),
+        "args": _to_jsonable(list(exc.args)),
+        "traceback": "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        ).strip(),
+    }
+
+    for attr_name in (
+        "status_code",
+        "model",
+        "request_id",
+        "code",
+        "param",
+        "max_retries",
+        "num_retries",
+    ):
+        attr_value = getattr(exc, attr_name, None)
+        if attr_value is not None:
+            payload[attr_name] = _to_jsonable(attr_value)
+
+    body = getattr(exc, "body", None)
+    if body is not None:
+        payload["body"] = _to_jsonable(body)
+
+    request_payload = _serialize_request(getattr(exc, "request", None))
+    if request_payload is not None:
+        payload["request"] = request_payload
+
+    response_payload = _serialize_response_error(getattr(exc, "response", None))
+    if response_payload is not None:
+        payload["response"] = response_payload
+
+    if exc.__cause__ is not None:
+        payload["cause"] = {
+            "type": type(exc.__cause__).__name__,
+            "message": str(exc.__cause__),
+        }
+    if exc.__context__ is not None and exc.__context__ is not exc.__cause__:
+        payload["context"] = {
+            "type": type(exc.__context__).__name__,
+            "message": str(exc.__context__),
+        }
+
+    return payload
 
 
 def serialize_message(message: Any) -> dict[str, Any]:

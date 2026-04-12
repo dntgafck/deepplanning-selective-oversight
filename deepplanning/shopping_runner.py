@@ -117,6 +117,7 @@ def run(
     max_llm_calls: int = 400,
     runs: int = 4,
     output_root: str | Path | None = None,
+    langfuse_session_id: str | None = None,
 ) -> None:
     load_dotenv()
     evaluation_pipeline, score_statistics = import_modules()
@@ -198,6 +199,7 @@ def run(
                 system=str(system),
                 database_dir_by_run=run_database_dirs,
                 output_dir_by_run=run_output_dirs,
+                session_id=langfuse_session_id,
             )
             print(
                 f"✅ Shopping inference complete: {results['success']}/{results['total']} succeeded"

@@ -6,6 +6,17 @@ models:
     api_key_env: OPENROUTER_API_KEY
     extra_body:
       reasoning:
+        enabled: false
+    max_retries: 30
+    backoff: 1.5
+
+  qwen3.5-9b:
+    model_name: qwen/qwen3.5-9b
+    model_type: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    extra_body:
+      reasoning:
         enabled: true
     max_retries: 30
     backoff: 1.5
@@ -26,8 +37,5 @@ models:
     model_type: openai
     base_url: https://openrouter.ai/api/v1
     api_key_env: OPENROUTER_API_KEY
-    extra_body:
-      reasoning:
-        enabled: true
     max_retries: 30
     backoff: 1.5

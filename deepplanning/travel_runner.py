@@ -128,11 +128,21 @@ def _build_sample_statuses(
         evaluation_entry = evaluation_by_id.get(sample_id)
 
         inference_complete = trajectory_path.exists() or task_result is not None
+        inference_success = (
+            bool(task_result.get("success"))
+            if task_result is not None and "success" in task_result
+            else trajectory_path.exists()
+        )
         report_generated = report_path.exists()
         final_output_present = (
             bool(task_result.get("final_output_present"))
             if task_result is not None
             else report_generated
+        )
+        failure_subtype = (
+            str(task_result.get("failure_subtype", "none"))
+            if task_result is not None
+            else "none"
         )
 
         if converted_path.exists():
@@ -170,6 +180,8 @@ def _build_sample_statuses(
         metrics_excerpt = None
         if task_result is not None:
             metrics_excerpt = {
+                "success": task_result.get("success"),
+                "failure_subtype": task_result.get("failure_subtype"),
                 "executor_calls": task_result.get("executor_calls"),
                 "tool_call_count": task_result.get("tool_call_count"),
                 "final_stop_reason": task_result.get("final_stop_reason"),
@@ -181,6 +193,8 @@ def _build_sample_statuses(
                 "sample_id": sample_id,
                 "task_id": task_key,
                 "inference_complete": inference_complete,
+                "inference_success": inference_success,
+                "failure_subtype": failure_subtype,
                 "report_generated": report_generated,
                 "final_output_present": final_output_present,
                 "conversion_status": conversion_status,
@@ -300,6 +314,7 @@ def run_language(
     cfg: Any,
     convert_report: object,
     eval_converted: object,
+    langfuse_session_id: str | None = None,
 ) -> None:
     database_dir = TRAVEL_DATA_ROOT / f"database_{language}"
     if not database_dir.exists():
@@ -350,6 +365,7 @@ def run_language(
             runs=runs,
             system=system,
             output_dir_by_run=run_output_dirs,
+            session_id=langfuse_session_id,
         )
         print(
             f"✅ Travel inference complete: {inference_results['success']}/{inference_results['total']} succeeded"
@@ -460,6 +476,7 @@ def run(
     output_root: str | Path | None = None,
     verbose: bool = False,
     debug: bool = False,
+    langfuse_session_id: str | None = None,
 ) -> None:
     load_dotenv()
     convert_report, eval_converted = import_modules()
@@ -495,4 +512,5 @@ def run(
                 cfg,
                 convert_report,
                 eval_converted,
+                langfuse_session_id=langfuse_session_id,
             )

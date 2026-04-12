@@ -8,12 +8,30 @@ from pathlib import Path
 from typing import Any
 
 from experiment import StructuredLogger, build_system_config, run_experiment
-from experiment.logging import serialize_messages
-from llm import call_chat_completion, extract_usage_tokens
+from experiment.logging import (
+    serialize_exception,
+    serialize_message,
+    serialize_messages,
+)
+from experiment.progress import InferenceProgressReporter
+from failure_subtypes import (
+    classify_exception_failure_subtype,
+    failure_subtype_from_stop_reason,
+)
+from llm import (
+    build_langfuse_trace_id,
+    call_chat_completion,
+    extract_usage_tokens,
+    flush_langfuse,
+)
 from oversight import ConversationState, apply_intervention, evaluate_oversight
 
 from .base import TaskResult
-from .vendor import load_travel_agent_class, load_travel_prompt
+from .vendor import (
+    clear_vendored_tool_module_cache,
+    load_travel_agent_class,
+    load_travel_prompt,
+)
 
 VendorTravelFnAgent = load_travel_agent_class()
 
@@ -53,7 +71,41 @@ def _resolve_run_output_dir(
     return base_output_dir
 
 
+def _error_summary(error_payload: dict[str, Any]) -> str:
+    error_type = error_payload.get("type", "Error")
+    message = str(error_payload.get("message", "")).strip()
+    return f"{error_type}: {message}" if message else str(error_type)
+
+
 class TravelAgentRunner(VendorTravelFnAgent):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        clear_vendored_tool_module_cache()
+        super().__init__(*args, **kwargs)
+        self._install_tool_aliases()
+
+    def _install_tool_aliases(self) -> None:
+        canonical_name = "recommend_restaurants"
+        alias_name = "recommend_around_restaurants"
+
+        canonical_tool = self.tool_instances.get(canonical_name)
+        if canonical_tool is not None and alias_name not in self.tool_instances:
+            self.tool_instances[alias_name] = canonical_tool
+
+        if any(
+            tool.get("function", {}).get("name") == alias_name
+            for tool in self.openai_tools
+        ):
+            return
+
+        for tool in self.openai_tools:
+            function = tool.get("function", {})
+            if function.get("name") != canonical_name:
+                continue
+            aliased_function = dict(function)
+            aliased_function["name"] = alias_name
+            self.openai_tools.append({"type": "function", "function": aliased_function})
+            break
+
     async def run_task(
         self,
         user_query: str,
@@ -62,6 +114,8 @@ class TravelAgentRunner(VendorTravelFnAgent):
         system_config: Any,
         logger: StructuredLogger | None = None,
         run_id: int = 0,
+        trace_id: str | None = None,
+        session_id: str | None = None,
     ) -> TaskResult:
         state.begin()
 
@@ -73,18 +127,54 @@ class TravelAgentRunner(VendorTravelFnAgent):
         llm_budget = system_config.max_steps
         while llm_budget > 0:
             llm_budget -= 1
+            step_count = system_config.max_steps - llm_budget
             request_messages = list(messages)
             started_at = time.time()
+
+            async def log_attempt_error(
+                payload: dict[str, Any],
+                *,
+                step: int = step_count,
+                task_id: str = state.task_id,
+                model_alias: str = system_config.executor_provider.alias,
+            ) -> None:
+                error_payload = payload.get("error", {})
+                retry_note = (
+                    "retrying" if payload.get("will_retry") else "no retries left"
+                )
+                print(
+                    "⚠️  Travel LLM call failed "
+                    f"(sample={task_id}, run={run_id}, step={step}, "
+                    f"attempt={payload.get('attempt')}/{payload.get('max_attempts')}, "
+                    f"{retry_note}): {_error_summary(error_payload)}"
+                )
+                if logger is None:
+                    return
+                await logger.log_event(
+                    "executor_llm_error",
+                    {
+                        "domain": "travel",
+                        "task_id": task_id,
+                        "run_id": run_id,
+                        "phase": "travel",
+                        "step": step,
+                        "model_alias": model_alias,
+                        **payload,
+                    },
+                )
+
             response = await call_chat_completion(
                 provider=system_config.executor_provider,
                 messages=request_messages,
                 tools=self.openai_tools,
                 reasoning_enabled=_executor_reasoning_enabled(system_config),
+                on_attempt_error=log_attempt_error,
+                trace_id=trace_id,
+                session_id=session_id,
             )
             ended_at = time.time()
             state.record_executor_call(response)
 
-            step_count = system_config.max_steps - llm_budget
             prompt_tokens, completion_tokens = extract_usage_tokens(response)
             assistant_message = response.choices[0].message
             calls = self._detect_tool_calls(assistant_message)
@@ -117,7 +207,7 @@ class TravelAgentRunner(VendorTravelFnAgent):
                     assistant_message = response.choices[0].message
                     calls = self._detect_tool_calls(assistant_message)
 
-            messages.append(assistant_message)
+            messages.append(serialize_message(assistant_message))
             tool_results: list[dict[str, Any]] = []
             if calls:
                 for call in calls:
@@ -223,6 +313,8 @@ async def run_agent_inference_async(
     rerun_ids: list[int] | None = None,
     system: str = "A",
     output_dir_by_run: dict[int, Path] | None = None,
+    trace_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     with test_data_path.open("r", encoding="utf-8") as fh:
         test_data = json.load(fh)
@@ -251,7 +343,14 @@ async def run_agent_inference_async(
     print(f"Model: {model}")
     print(f"Language: {language}")
     print(f"Samples: {len(test_data)}")
+    print(f"Runs: {runs}")
     print(f"Workers: {workers}")
+    progress = InferenceProgressReporter(
+        domain="travel",
+        samples_per_run=len(test_data),
+        runs=runs,
+    )
+    print(f"Execution mode: {progress.execution_mode(workers)}")
     print(f"{'=' * 80}\n")
 
     system_config = build_system_config(
@@ -297,10 +396,18 @@ async def run_agent_inference_async(
             complexity=complexity,
             system_config_name=system,
         )
+        logger: StructuredLogger | None = None
 
         try:
             run_output_dir = resolve_run_output_dir(run_id)
             logger = get_logger(run_id)
+            sample_trace_id = trace_id or build_langfuse_trace_id(
+                session_id,
+                "travel",
+                model,
+                run_id,
+                sample_id_raw,
+            )
             runner = TravelAgentRunner(
                 model=system_config.executor_provider.alias,
                 sample_id=str(sample_id_raw),
@@ -315,9 +422,14 @@ async def run_agent_inference_async(
                 system_config=system_config,
                 logger=logger,
                 run_id=run_id,
+                trace_id=sample_trace_id,
+                session_id=session_id,
             )
 
             serialized_messages = serialize_messages(result.messages)
+            failure_subtype = failure_subtype_from_stop_reason(
+                result.state.final_stop_reason
+            )
             payload = {
                 "id": sample_id,
                 "query": query,
@@ -327,6 +439,7 @@ async def run_agent_inference_async(
                 "messages": serialized_messages,
                 "elapsed_time": state.wall_time_seconds,
                 "success": True,
+                "failure_subtype": failure_subtype,
             }
             trajectory_file = run_output_dir / "trajectories" / f"{sample_id}.json"
             trajectory_file.write_text(
@@ -347,28 +460,65 @@ async def run_agent_inference_async(
                     "run_id": run_id,
                     "system": system,
                     "domain": "travel",
+                    "success": True,
+                    "failure_subtype": failure_subtype,
                     "final_output": result.output,
                 }
             )
-            print(f"✅ Sample {sample_id} completed in {state.wall_time_seconds:.2f}s")
+            await progress.record_completion(
+                run_id=run_id,
+                sample_id=sample_id,
+                success=True,
+                elapsed_seconds=state.wall_time_seconds,
+            )
             return payload
         except Exception as exc:
-            await logger.log_event(
-                "task_error",
-                {
-                    "domain": "travel",
-                    "task_id": sample_id,
-                    "run_id": run_id,
-                    "error": str(exc),
-                },
+            if not state.end_time:
+                state.finish()
+            error_payload = serialize_exception(exc)
+            failure_subtype = classify_exception_failure_subtype(exc)
+            if logger is None:
+                try:
+                    logger = get_logger(run_id)
+                except Exception:
+                    logger = None
+            if logger is not None:
+                await logger.log_event(
+                    "task_error",
+                    {
+                        "domain": "travel",
+                        "task_id": sample_id,
+                        "run_id": run_id,
+                        "failure_subtype": failure_subtype,
+                        "error": error_payload,
+                    },
+                )
+                await logger.log_result(
+                    {
+                        **state.to_metrics(),
+                        "task_id": sample_id,
+                        "run_id": run_id,
+                        "system": system,
+                        "domain": "travel",
+                        "success": False,
+                        "failure_subtype": failure_subtype,
+                        "final_output": None,
+                        "error": error_payload,
+                    }
+                )
+            await progress.record_completion(
+                run_id=run_id,
+                sample_id=sample_id,
+                success=False,
+                error_summary=_error_summary(error_payload),
             )
-            print(f"❌ Sample {sample_id} failed: {exc}")
             traceback.print_exc()
             return {
                 "id": sample_id,
                 "query": query,
                 "success": False,
-                "error": str(exc),
+                "failure_subtype": failure_subtype,
+                "error": error_payload.get("message", str(exc)),
             }
 
     raw_results = await run_experiment(
@@ -405,20 +555,28 @@ def run_agent_inference(
     rerun_ids: list[int] | None = None,
     system: str = "A",
     output_dir_by_run: dict[int, Path] | None = None,
+    trace_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    return asyncio.run(
-        run_agent_inference_async(
-            model=model,
-            language=language,
-            test_data_path=test_data_path,
-            database_dir=database_dir,
-            tool_schema_path=tool_schema_path,
-            output_dir=output_dir,
-            workers=workers,
-            max_llm_calls=max_llm_calls,
-            runs=runs,
-            rerun_ids=rerun_ids,
-            system=system,
-            output_dir_by_run=output_dir_by_run,
-        )
-    )
+    async def _run_with_cleanup() -> dict[str, Any]:
+        try:
+            return await run_agent_inference_async(
+                model=model,
+                language=language,
+                test_data_path=test_data_path,
+                database_dir=database_dir,
+                tool_schema_path=tool_schema_path,
+                output_dir=output_dir,
+                workers=workers,
+                max_llm_calls=max_llm_calls,
+                runs=runs,
+                rerun_ids=rerun_ids,
+                system=system,
+                output_dir_by_run=output_dir_by_run,
+                trace_id=trace_id,
+                session_id=session_id,
+            )
+        finally:
+            flush_langfuse()
+
+    return asyncio.run(_run_with_cleanup())

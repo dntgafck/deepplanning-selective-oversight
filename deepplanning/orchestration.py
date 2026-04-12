@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 
 from .aggregation import aggregate_results
 from .config import (
-    OUTPUT_ROOT,
     compose_config,
     ensure_directory,
     extract_experiment_key,
@@ -29,6 +28,7 @@ from .travel_runner import run as run_travel
 
 DEFAULT_OUTPUT_ROOT = "outputs/deepplanning/experiments"
 DEFAULT_METADATA_FILENAME = "experiment_session.json"
+MAX_LANGFUSE_SESSION_ID_LENGTH = 200
 
 
 def _has_value(value: object | None) -> bool:
@@ -50,6 +50,12 @@ def _safe_name(value: str) -> str:
             "Experiment name must contain at least one path-safe character."
         )
     return cleaned
+
+
+def _build_langfuse_session_id(session_root: Path) -> str:
+    session_id = _safe_name(session_root.name)
+    truncated = session_id[:MAX_LANGFUSE_SESSION_ID_LENGTH].rstrip("-_.")
+    return truncated or "session"
 
 
 def _legacy_kwargs_to_public_overrides(kwargs: dict[str, Any]) -> list[str]:
@@ -78,7 +84,9 @@ def _legacy_kwargs_to_public_overrides(kwargs: dict[str, Any]) -> list[str]:
     models = resolved.pop("models", None)
     if _has_value(models):
         selected_models = normalize_string_list(models) or [str(models)]
-        model_value: Any = selected_models[0] if len(selected_models) == 1 else selected_models
+        model_value: Any = (
+            selected_models[0] if len(selected_models) == 1 else selected_models
+        )
         overrides.append(f"models.executor={hydra_value(model_value)}")
 
     system = resolved.pop("system", None)
@@ -263,6 +271,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
     shopping_cfg = OmegaConf.to_container(cfg.shopping, resolve=True) or {}
     travel_cfg = OmegaConf.to_container(cfg.travel, resolve=True) or {}
     system_name = str(cfg.system.name)
+    langfuse_session_id = _build_langfuse_session_id(output_root)
 
     domain_names = _domain_names(cfg)
     executor_models = _executor_models(cfg)
@@ -277,6 +286,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             max_llm_calls=int(runtime_cfg.get("max_llm_calls", 400)),
             runs=int(runtime_cfg.get("runs", 1)),
             output_root=output_root / "shopping",
+            langfuse_session_id=langfuse_session_id,
         )
 
     if "travel" in domain_names:
@@ -293,6 +303,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             output_root=output_root / "travel",
             verbose=bool(travel_cfg.get("verbose", False)),
             debug=bool(travel_cfg.get("debug", False)),
+            langfuse_session_id=langfuse_session_id,
         )
 
     for model in executor_models:
@@ -332,142 +343,6 @@ def run(*overrides: str, **legacy_kwargs: Any) -> Path:
 
     run_benchmark_from_cfg(cfg, session_root)
     return session_root
-
-
-def run_benchmark_compat(
-    domains: str | None = None,
-    models: str | None = None,
-    system: str | None = None,
-    shopping_levels: str | None = None,
-    shopping_sample_ids: str | None = None,
-    workers: int | None = None,
-    max_llm_calls: int | None = None,
-    runs: int | None = None,
-    travel_language: str | None = None,
-    travel_start_from: str | None = None,
-    travel_evaluation_mode: str | None = None,
-    travel_sample_ids: str | None = None,
-    output_root: str | None = None,
-) -> None:
-    cfg = compose_config(
-        "experiment",
-        _legacy_kwargs_to_public_overrides(
-            {
-                "domains": domains,
-                "models": models,
-                "system": system,
-                "shopping_levels": shopping_levels,
-                "shopping_sample_ids": shopping_sample_ids,
-                "workers": workers,
-                "max_llm_calls": max_llm_calls,
-                "runs": runs,
-                "travel_language": travel_language,
-                "travel_start_from": travel_start_from,
-                "travel_evaluation_mode": travel_evaluation_mode,
-                "travel_sample_ids": travel_sample_ids,
-            }
-        ),
-    )
-    configured_output_root = str(getattr(cfg, "output_root", "") or "").strip()
-    resolved_output_root = output_root
-    if not resolved_output_root:
-        resolved_output_root = (
-            configured_output_root
-            if configured_output_root and configured_output_root != DEFAULT_OUTPUT_ROOT
-            else OUTPUT_ROOT
-        )
-    benchmark_output_root = ensure_directory(resolve_repo_path(resolved_output_root))
-    run_benchmark_from_cfg(cfg, benchmark_output_root)
-
-
-def run_shopping_compat(
-    models: str | None = None,
-    levels: str | None = None,
-    sample_ids: str | None = None,
-    system: str | None = None,
-    workers: int | None = None,
-    max_llm_calls: int | None = None,
-    runs: int | None = None,
-    output_root: str | None = None,
-) -> None:
-    cfg = compose_config(
-        "experiment",
-        _legacy_kwargs_to_public_overrides(
-            {
-                "domains": ["shopping"],
-                "models": models,
-                "system": system,
-                "workers": workers,
-                "max_llm_calls": max_llm_calls,
-                "runs": runs,
-                "shopping_levels": levels,
-                "shopping_sample_ids": sample_ids,
-            }
-        ),
-    )
-    runtime_cfg = OmegaConf.to_container(cfg.runtime, resolve=True) or {}
-    shopping_cfg = OmegaConf.to_container(cfg.shopping, resolve=True) or {}
-    run_shopping(
-        models=_executor_models(cfg),
-        levels=shopping_cfg.get("levels"),
-        sample_ids=shopping_cfg.get("sample_ids"),
-        system=str(cfg.system.name),
-        workers=int(runtime_cfg.get("workers", 20)),
-        max_llm_calls=int(runtime_cfg.get("max_llm_calls", 400)),
-        runs=int(runtime_cfg.get("runs", 1)),
-        output_root=output_root or shopping_cfg.get("output_root"),
-    )
-
-
-def run_travel_compat(
-    models: str | None = None,
-    language: str | None = None,
-    sample_ids: str | None = None,
-    system: str | None = None,
-    workers: int | None = None,
-    max_llm_calls: int | None = None,
-    runs: int | None = None,
-    start_from: str | None = None,
-    evaluation_mode: str | None = None,
-    output_root: str | None = None,
-    verbose: bool | None = None,
-    debug: bool | None = None,
-) -> None:
-    cfg = compose_config(
-        "experiment",
-        _legacy_kwargs_to_public_overrides(
-            {
-                "domains": ["travel"],
-                "models": models,
-                "system": system,
-                "workers": workers,
-                "max_llm_calls": max_llm_calls,
-                "runs": runs,
-                "travel_language": language,
-                "travel_start_from": start_from,
-                "travel_evaluation_mode": evaluation_mode,
-                "travel_sample_ids": sample_ids,
-                "travel_verbose": verbose,
-                "travel_debug": debug,
-            }
-        ),
-    )
-    runtime_cfg = OmegaConf.to_container(cfg.runtime, resolve=True) or {}
-    travel_cfg = OmegaConf.to_container(cfg.travel, resolve=True) or {}
-    run_travel(
-        models=_executor_models(cfg),
-        language=travel_cfg.get("language"),
-        sample_ids=travel_cfg.get("sample_ids"),
-        system=str(cfg.system.name),
-        workers=int(runtime_cfg.get("workers", 20)),
-        max_llm_calls=int(runtime_cfg.get("max_llm_calls", 400)),
-        runs=int(runtime_cfg.get("runs", 1)),
-        start_from=str(travel_cfg.get("start_from", "inference")),
-        evaluation_mode=str(travel_cfg.get("evaluation_mode", "auto")),
-        output_root=output_root or travel_cfg.get("output_root"),
-        verbose=bool(travel_cfg.get("verbose", False)),
-        debug=bool(travel_cfg.get("debug", False)),
-    )
 
 
 def main(argv: list[str] | None = None) -> None:

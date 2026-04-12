@@ -1,17 +1,37 @@
 from __future__ import annotations
 
+import contextlib
+import inspect
 import os
+import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from langfuse import Langfuse, get_client, propagate_attributes
+from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
+from openai import AsyncOpenAI as OpenAIAsyncOpenAI
 from tenacity import (
     AsyncRetrying,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
 from deepplanning.config import load_model_config
+from experiment.logging import serialize_exception, serialize_messages
+from failure_subtypes import (
+    classify_exception_failure_subtype,
+    is_transient_infrastructure_error,
+)
+
+RetryErrorHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
+LANGFUSE_ID_PART_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
+MAX_LANGFUSE_SESSION_ID_LENGTH = 200
+
+
+def _langfuse_enabled() -> bool:
+    return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
 
 
 def _is_reasoning_model(model_name: str) -> bool:
@@ -78,42 +98,74 @@ def _validate_response(response: Any) -> None:
         raise ValueError("Model returned an empty response without tool calls")
 
 
-def _retryable_exception_types(litellm_module: Any) -> tuple[type[BaseException], ...]:
+def _retryable_exception_types(openai_module: Any) -> tuple[type[BaseException], ...]:
     exception_names = (
         "APIConnectionError",
-        "APIError",
+        "APITimeoutError",
         "InternalServerError",
         "RateLimitError",
-        "ServiceUnavailableError",
-        "Timeout",
     )
     retryable: list[type[BaseException]] = [ConnectionError, OSError, TimeoutError]
     for name in exception_names:
-        exc_type = getattr(litellm_module, name, None)
+        exc_type = getattr(openai_module, name, None)
         if isinstance(exc_type, type) and issubclass(exc_type, BaseException):
             retryable.append(exc_type)
     return tuple(dict.fromkeys(retryable))
 
 
-def _configure_litellm_callbacks() -> None:
-    import litellm
+def _should_retry_exception(
+    exc: BaseException,
+    *,
+    retryable_exception_types: tuple[type[BaseException], ...],
+) -> bool:
+    return is_transient_infrastructure_error(
+        exc,
+        retryable_exception_types=retryable_exception_types,
+    )
 
-    if not os.getenv("LANGFUSE_PUBLIC_KEY") or not os.getenv("LANGFUSE_SECRET_KEY"):
+
+def _normalize_langfuse_id_parts(*parts: object) -> list[str]:
+    normalized_parts: list[str] = []
+    for part in parts:
+        if part is None:
+            continue
+        value = LANGFUSE_ID_PART_PATTERN.sub("-", str(part).strip()).strip("-_.")
+        if value:
+            normalized_parts.append(value)
+    return normalized_parts
+
+
+def build_langfuse_session_id(*parts: object) -> str:
+    session_id = "-".join(_normalize_langfuse_id_parts(*parts)) or "session"
+    truncated = session_id[:MAX_LANGFUSE_SESSION_ID_LENGTH].rstrip("-_.")
+    return truncated or "session"
+
+
+def build_langfuse_trace_id(*parts: object) -> str:
+    seed = "-".join(_normalize_langfuse_id_parts(*parts)) or "inference"
+    return Langfuse.create_trace_id(seed=seed)
+
+
+def flush_langfuse() -> None:
+    if not _langfuse_enabled():
         return
 
-    # LiteLLM's legacy "langfuse" callback path still targets the older SDK.
-    # For Langfuse 4.x, route directly to the OTEL integration instead.
-    if not os.getenv("LANGFUSE_OTEL_HOST") and os.getenv("LANGFUSE_HOST"):
-        os.environ["LANGFUSE_OTEL_HOST"] = os.environ["LANGFUSE_HOST"]
+    with contextlib.suppress(Exception):
+        get_client().flush()
 
-    callbacks = [
-        callback
-        for callback in list(getattr(litellm, "callbacks", []) or [])
-        if callback != "langfuse"
-    ]
-    if "langfuse_otel" not in callbacks:
-        callbacks.append("langfuse_otel")
-    litellm.callbacks = callbacks
+
+def _build_async_client(
+    provider: ProviderConfig,
+    api_key: str | None,
+) -> Any:
+    client_kwargs: dict[str, Any] = {"max_retries": 0}
+    if api_key is not None:
+        client_kwargs["api_key"] = api_key
+    if provider.api_base:
+        client_kwargs["base_url"] = provider.api_base
+
+    client_cls = LangfuseAsyncOpenAI if _langfuse_enabled() else OpenAIAsyncOpenAI
+    return client_cls(**client_kwargs)
 
 
 async def call_chat_completion(
@@ -122,10 +174,12 @@ async def call_chat_completion(
     tools: list[dict[str, Any]] | None = None,
     reasoning_enabled: bool | None = None,
     validate_nonempty: bool = False,
+    on_attempt_error: RetryErrorHandler | None = None,
+    error_context: dict[str, Any] | None = None,
+    trace_id: str | None = None,
+    session_id: str | None = None,
 ) -> Any:
-    import litellm
-
-    _configure_litellm_callbacks()
+    import openai
 
     api_key = os.getenv(provider.api_key_env) if provider.api_key_env else None
     if provider.api_key_env and not api_key:
@@ -135,13 +189,8 @@ async def call_chat_completion(
 
     params: dict[str, Any] = {
         "model": provider.model,
-        "messages": messages,
-        "api_key": api_key,
+        "messages": serialize_messages(messages),
     }
-    if provider.provider:
-        params["custom_llm_provider"] = provider.provider
-    if provider.api_base:
-        params["api_base"] = provider.api_base
     if tools:
         params["tools"] = tools
     if provider.temperature is not None and not _is_reasoning_model(provider.model):
@@ -151,18 +200,70 @@ async def call_chat_completion(
     if extra_body:
         params["extra_body"] = extra_body
 
-    async for attempt in AsyncRetrying(
-        stop=stop_after_attempt(max(provider.max_retries, 1)),
+    if _langfuse_enabled():
+        params["name"] = "deepplanning-chat-completion"
+        params["metadata"] = {
+            "model_alias": provider.alias,
+            "provider": provider.provider or "openai",
+        }
+        if trace_id:
+            params["trace_id"] = trace_id
+
+    max_attempts = max(provider.max_retries, 1)
+    retryable_exceptions = _retryable_exception_types(openai)
+    retryer = AsyncRetrying(
+        stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(
             multiplier=max(provider.backoff, 0.1), min=max(provider.backoff, 0.1)
         ),
-        retry=retry_if_exception_type(_retryable_exception_types(litellm)),
+        retry=retry_if_exception(
+            lambda exc: _should_retry_exception(
+                exc,
+                retryable_exception_types=retryable_exceptions,
+            )
+        ),
         reraise=True,
-    ):
+    )
+
+    async for attempt in retryer:
         with attempt:
-            response = await litellm.acompletion(**params)
-            if validate_nonempty:
-                _validate_response(response)
-            return response
+            client = _build_async_client(provider, api_key)
+            async with client:
+                scope = (
+                    propagate_attributes(session_id=session_id)
+                    if _langfuse_enabled() and session_id
+                    else contextlib.nullcontext()
+                )
+                with scope:
+                    response = await client.chat.completions.create(**params)
+                    if validate_nonempty:
+                        _validate_response(response)
+
+        outcome = attempt.retry_state.outcome
+        if outcome is not None and outcome.failed:
+            exc = outcome.exception()
+            if exc is not None and on_attempt_error is not None:
+                payload = {
+                    "attempt": attempt.retry_state.attempt_number,
+                    "max_attempts": max_attempts,
+                    "will_retry": _should_retry_exception(
+                        exc,
+                        retryable_exception_types=retryable_exceptions,
+                    )
+                    and attempt.retry_state.attempt_number < max_attempts,
+                    "failure_subtype": classify_exception_failure_subtype(
+                        exc,
+                        retryable_exception_types=retryable_exceptions,
+                    ),
+                    "error": serialize_exception(exc),
+                }
+                if error_context:
+                    payload.update(error_context)
+                maybe_awaitable = on_attempt_error(payload)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            continue
+
+        return response
 
     raise RuntimeError("LLM call failed unexpectedly")

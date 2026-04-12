@@ -21,6 +21,23 @@ def _ensure_path(path: Path) -> None:
         sys.path.insert(0, path_str)
 
 
+def clear_vendored_tool_module_cache() -> None:
+    """Drop ambiguous top-level tool modules before switching benchmark domains."""
+    prefixes = ("tools", "base_shopping_tool", "base_travel_tool")
+    for module_name in list(sys.modules):
+        if any(
+            module_name == prefix or module_name.startswith(f"{prefix}.")
+            for prefix in prefixes
+        ):
+            sys.modules.pop(module_name, None)
+
+    qwen_tool_registry = getattr(
+        sys.modules.get("qwen_agent.tools.base"), "TOOL_REGISTRY", None
+    )
+    if isinstance(qwen_tool_registry, dict):
+        qwen_tool_registry.clear()
+
+
 def _install_qwen_tool_shim() -> None:
     if "qwen_agent.tools.base" in sys.modules:
         return

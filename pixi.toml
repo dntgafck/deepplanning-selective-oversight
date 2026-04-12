@@ -8,7 +8,6 @@ version = "0.1.0"
 [tasks]
 lint-all = "pre-commit run --all-files"
 test = "pytest"
-deepplanning-benchmark = "python scripts/run_experiment.py"
 deepplanning-experiment = "python scripts/run_experiment.py"
 
 [dependencies]
@@ -29,11 +28,9 @@ httpx = ">=0.27,<1"
 tenacity = ">=8.3,<10"
 huggingface-hub = ">=0.30,<1"
 openai = ">=1.54,<2"
-litellm = ">=1.74,<2"
 rank-bm25 = ">=0.2.2,<0.3"
 
 # CLI / config / workflow
-fire = "*"
 hydra-core = ">=1.3.2,<2"
 dvc = { version = ">=3.65.0,<4", extras = ["s3"] }
 pytest = ">=8.2,<9"

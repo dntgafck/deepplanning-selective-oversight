@@ -135,7 +135,5 @@ Each experiment session writes a timestamped directory under
 - `experiment_session.json`
 - domain outputs under `travel/` and `shopping/`
 
-The older `scripts/run_deepplanning_benchmark.py`,
-`scripts/run_deepplanning_shopping.py`, and `scripts/run_deepplanning_travel.py`
-entrypoints remain as thin internal/debug wrappers, but the documented interface
-is `scripts/run_experiment.py` via `pixi run deepplanning-experiment`.
+The documented interface is `scripts/run_experiment.py` via
+`pixi run deepplanning-experiment`.

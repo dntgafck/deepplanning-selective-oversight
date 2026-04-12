@@ -14,5 +14,5 @@ domains:
   - travel
   - shopping
 models:
-  executor: qwen3-14b
+  executor: qwen3.5-9b
   overseer: deepseek-v3.2

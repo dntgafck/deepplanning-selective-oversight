@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,11 +12,12 @@ from omegaconf import OmegaConf
 
 from agent import shopping as shopping_module
 from agent import travel as travel_module
+from deepplanning import aggregation as aggregation_module
+from deepplanning import orchestration as orchestration_module
+from deepplanning import shopping_runner as shopping_runtime_module
+from deepplanning import travel_runner as travel_runtime_module
 from experiment import StructuredLogger, build_system_config
 from oversight import ConversationState
-from scripts import run_deepplanning_benchmark as benchmark_script
-from scripts import run_deepplanning_shopping as shopping_script
-from scripts import run_deepplanning_travel as travel_script
 from scripts import run_experiment as experiment_script
 from scripts.deepplanning_common import (
     filter_samples_by_ids,
@@ -202,7 +205,20 @@ def test_travel_runner_matches_benchmark_loop_and_logs_turns(monkeypatch, tmp_pa
     assert state.final_output_present is True
     assert captured_calls[0]["reasoning_enabled"] is False
     assert captured_calls[1]["reasoning_enabled"] is False
-    assert isinstance(captured_calls[1]["messages"][2], FakeMessage)
+    assert captured_calls[1]["messages"][2] == {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "query_train_info",
+                    "arguments": '{"departure":"A","arrival":"B"}',
+                },
+            }
+        ],
+    }
     assert any(
         isinstance(message, dict)
         and message.get("role") == "tool"
@@ -242,6 +258,31 @@ def test_travel_runner_loads_vendored_tool_instances():
     assert "query_train_info" in runner.tool_instances
     assert "query_hotel_info" in runner.tool_instances
     assert "recommend_restaurants" in runner.tool_instances
+    assert "recommend_around_restaurants" in runner.tool_instances
+    assert "recommend_around_restaurants" in [
+        tool["function"]["name"] for tool in runner.openai_tools
+    ]
+
+
+def test_cross_domain_agent_initialization_keeps_tool_registries_isolated():
+    shopping_runner = shopping_module.ShoppingAgentRunner(
+        model="qwen-plus",
+        sample_id="1",
+        database_base_path=str(SHOPPING_FIXTURE_ROOT),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    travel_runner = travel_module.TravelAgentRunner(
+        model="qwen-plus",
+        sample_id="0",
+        database_base_path=str(TRAVEL_DATABASE_DIR),
+        tool_schema_path=str(TRAVEL_SCHEMA_PATH),
+        language="en",
+    )
+
+    assert "search_products" in shopping_runner.tool_instances
+    assert "query_train_info" in travel_runner.tool_instances
+    assert "query_hotel_info" in travel_runner.tool_instances
+    assert "recommend_around_restaurants" in travel_runner.tool_instances
 
 
 def test_travel_runner_stops_immediately_on_no_tool_response(monkeypatch):
@@ -286,9 +327,10 @@ def test_travel_runner_stops_immediately_on_no_tool_response(monkeypatch):
     assert result.output == "Day 1 itinerary"
     assert state.executor_calls == 1
     assert state.final_stop_reason == "no_tool_calls"
-    assert getattr(result.messages[-1], "content", "") == (
-        "<think>reasoning</think><plan>Day 1 itinerary</plan>"
-    )
+    assert result.messages[-1] == {
+        "role": "assistant",
+        "content": "<think>reasoning</think><plan>Day 1 itinerary</plan>",
+    }
 
 
 def test_shopping_runner_breaks_phase_one_and_adds_cart_message(monkeypatch, tmp_path):
@@ -486,6 +528,273 @@ def test_shopping_run_agent_inference_logs_under_output_dir(monkeypatch, tmp_pat
     assert "tool_results" in records[0]
 
 
+def test_shopping_run_agent_inference_scopes_trace_per_case(monkeypatch, tmp_path):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text(
+        json.dumps(
+            [
+                {"id": 1, "query": "test shopping query 1", "level": 1},
+                {"id": 10, "query": "test shopping query 10", "level": 1},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    captured_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        shopping_module,
+        "build_langfuse_trace_id",
+        lambda *parts: "|".join(str(part) for part in parts),
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(
+                    content="Phase one complete.",
+                    prompt_tokens=10,
+                    completion_tokens=4,
+                ),
+                FakeResponse(
+                    content="Cart verified.",
+                    prompt_tokens=11,
+                    completion_tokens=5,
+                ),
+                FakeResponse(
+                    content="Phase one complete.",
+                    prompt_tokens=12,
+                    completion_tokens=4,
+                ),
+                FakeResponse(
+                    content="Cart verified.",
+                    prompt_tokens=13,
+                    completion_tokens=5,
+                ),
+            ],
+            captured_calls,
+        ),
+    )
+
+    results = shopping_module.run_agent_inference(
+        model="qwen-plus",
+        test_data_path=test_data_path,
+        database_dir=run_database_dir,
+        tool_schema_path=SHOPPING_SCHEMA_PATH,
+        system_prompt=shopping_module.get_system_prompt(1),
+        output_dir=tmp_path / "shopping_logs",
+        workers=1,
+        max_llm_calls=2,
+        system="A",
+        session_id="bench-session",
+    )
+
+    assert results["success"] == 2
+    assert [call["trace_id"] for call in captured_calls] == [
+        "bench-session|shopping|qwen-plus|0|1",
+        "bench-session|shopping|qwen-plus|0|1",
+        "bench-session|shopping|qwen-plus|0|10",
+        "bench-session|shopping|qwen-plus|0|10",
+    ]
+    assert {call["session_id"] for call in captured_calls} == {"bench-session"}
+
+
+def test_shopping_run_agent_inference_logs_structured_task_error(monkeypatch, tmp_path):
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text(
+        json.dumps([{"id": 1, "query": "test shopping query", "level": 1}]),
+        encoding="utf-8",
+    )
+
+    class FakeShoppingRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            raise RuntimeError("shopping boom")
+
+    monkeypatch.setattr(shopping_module, "ShoppingAgentRunner", FakeShoppingRunner)
+
+    output_dir = tmp_path / "shopping_logs"
+    results = shopping_module.run_agent_inference(
+        model="qwen-plus",
+        test_data_path=test_data_path,
+        database_dir=tmp_path / "shopping_db",
+        tool_schema_path=tmp_path / "shopping_tool_schema.json",
+        system_prompt=shopping_module.get_system_prompt(1),
+        output_dir=output_dir,
+        workers=1,
+        max_llm_calls=2,
+        system="A",
+    )
+
+    assert results["failed"] == 1
+    records = _load_jsonl(output_dir / "agent_events.jsonl")
+    task_results = _load_jsonl(output_dir / "task_results.jsonl")
+    assert records[0]["event_type"] == "task_error"
+    assert records[0]["failure_subtype"] == "none"
+    assert records[0]["error"]["type"] == "RuntimeError"
+    assert records[0]["error"]["message"] == "shopping boom"
+    assert "shopping boom" in records[0]["error"]["traceback"]
+    assert task_results[0]["success"] is False
+    assert task_results[0]["failure_subtype"] == "none"
+    assert task_results[0]["error"]["message"] == "shopping boom"
+
+
+def test_shopping_run_agent_inference_records_max_tool_calls_failure_subtype(
+    monkeypatch, tmp_path
+):
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text(
+        json.dumps([{"id": 1, "query": "test shopping query", "level": 1}]),
+        encoding="utf-8",
+    )
+
+    class FakeShoppingRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            state = kwargs["state"]
+            state.begin()
+            state.record_final_outcome(
+                stop_reason="max_steps_exhausted",
+                output=None,
+                max_steps_hit=True,
+            )
+            state.finish()
+            return shopping_module.TaskResult(
+                task_id=state.task_id,
+                run_id=kwargs["run_id"],
+                output="",
+                messages=[],
+                state=state,
+            )
+
+    monkeypatch.setattr(shopping_module, "ShoppingAgentRunner", FakeShoppingRunner)
+
+    output_dir = tmp_path / "shopping_logs"
+    results = shopping_module.run_agent_inference(
+        model="qwen-plus",
+        test_data_path=test_data_path,
+        database_dir=tmp_path / "shopping_db",
+        tool_schema_path=tmp_path / "shopping_tool_schema.json",
+        system_prompt=shopping_module.get_system_prompt(1),
+        output_dir=output_dir,
+        workers=1,
+        max_llm_calls=2,
+        system="A",
+    )
+
+    assert results["success"] == 1
+    task_results = _load_jsonl(output_dir / "task_results.jsonl")
+    assert task_results[0]["success"] is True
+    assert task_results[0]["failure_subtype"] == "max_tool_calls"
+    assert task_results[0]["final_stop_reason"] == "max_steps_exhausted"
+
+
+def test_shopping_run_agent_inference_prints_per_run_progress(
+    monkeypatch, tmp_path, capsys
+):
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text(
+        json.dumps([{"id": 1, "query": "test shopping query", "level": 1}]),
+        encoding="utf-8",
+    )
+
+    class FakeShoppingRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            state = kwargs["state"]
+            run_id = kwargs["run_id"]
+            state.begin()
+            state.record_final_outcome(
+                stop_reason="no_tool_calls",
+                output=f"run-{run_id}",
+                max_steps_hit=False,
+            )
+            state.finish()
+            return shopping_module.TaskResult(
+                task_id=state.task_id,
+                run_id=run_id,
+                output=f"run-{run_id}",
+                messages=[],
+                state=state,
+            )
+
+    monkeypatch.setattr(shopping_module, "ShoppingAgentRunner", FakeShoppingRunner)
+
+    database_dir_by_run = {
+        0: tmp_path / "shopping_db_run_0",
+        1: tmp_path / "shopping_db_run_1",
+    }
+    for path in database_dir_by_run.values():
+        path.mkdir(parents=True)
+
+    results = shopping_module.run_agent_inference(
+        model="qwen-plus",
+        test_data_path=test_data_path,
+        database_dir=database_dir_by_run[0],
+        tool_schema_path=SHOPPING_SCHEMA_PATH,
+        system_prompt=shopping_module.get_system_prompt(1),
+        output_dir=tmp_path / "shopping_logs",
+        workers=1,
+        max_llm_calls=2,
+        runs=2,
+        system="A",
+        database_dir_by_run=database_dir_by_run,
+    )
+
+    assert results["success"] == 2
+    output = capsys.readouterr().out
+    assert "Execution mode: concurrent across runs" in output
+    assert "Shopping progress | run 1/2" in output
+    assert "Shopping progress | run 2/2" in output
+    assert "overall: 1/2 done, 1 left" in output
+    assert "overall: 2/2 done, 0 left" in output
+
+
+def test_shopping_run_agent_inference_flushes_langfuse(monkeypatch, tmp_path):
+    cleanup_calls: list[str] = []
+
+    async def fake_run_agent_inference_async(**kwargs):
+        return {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "elapsed_time": 0,
+            "results": [],
+        }
+
+    def fake_flush() -> None:
+        cleanup_calls.append("shopping")
+
+    monkeypatch.setattr(
+        shopping_module, "run_agent_inference_async", fake_run_agent_inference_async
+    )
+    monkeypatch.setattr(shopping_module, "flush_langfuse", fake_flush)
+
+    results = shopping_module.run_agent_inference(
+        model="qwen-plus",
+        test_data_path=tmp_path / "shopping_samples.json",
+        database_dir=tmp_path / "shopping_db",
+        tool_schema_path=SHOPPING_SCHEMA_PATH,
+        system_prompt="prompt",
+        output_dir=tmp_path / "shopping_output",
+        workers=1,
+        max_llm_calls=1,
+        runs=1,
+        system="A",
+    )
+
+    assert results["total"] == 0
+    assert cleanup_calls == ["shopping"]
+
+
 def test_travel_run_agent_inference_isolates_multi_run_outputs(monkeypatch, tmp_path):
     test_data_path = tmp_path / "travel_samples.json"
     test_data_path.write_text(
@@ -543,6 +852,156 @@ def test_travel_run_agent_inference_isolates_multi_run_outputs(monkeypatch, tmp_
     assert run_one_records[0]["run_id"] == 1
     assert (output_root / "run_0" / "reports" / "id_0.txt").exists()
     assert (output_root / "run_1" / "reports" / "id_0.txt").exists()
+
+
+def test_travel_run_agent_inference_prints_per_run_progress(
+    monkeypatch, tmp_path, capsys
+):
+    test_data_path = tmp_path / "travel_samples.json"
+    test_data_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": 0,
+                    "query": "test travel query",
+                    "meta_info": {"days": 2},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeTravelRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            state = kwargs["state"]
+            run_id = kwargs["run_id"]
+            state.begin()
+            state.record_final_outcome(
+                stop_reason="no_tool_calls",
+                output=f"plan-{run_id}",
+                max_steps_hit=False,
+            )
+            state.finish()
+            return travel_module.TaskResult(
+                task_id=state.task_id,
+                run_id=run_id,
+                output=f"plan-{run_id}",
+                messages=[],
+                state=state,
+            )
+
+    monkeypatch.setattr(travel_module, "TravelAgentRunner", FakeTravelRunner)
+
+    results = travel_module.run_agent_inference(
+        model="qwen-plus",
+        language="en",
+        test_data_path=test_data_path,
+        database_dir=TRAVEL_DATABASE_DIR,
+        tool_schema_path=TRAVEL_SCHEMA_PATH,
+        output_dir=tmp_path / "travel_output",
+        workers=1,
+        max_llm_calls=1,
+        runs=2,
+        system="A",
+    )
+
+    assert results["success"] == 2
+    output = capsys.readouterr().out
+    assert "Execution mode: concurrent across runs" in output
+    assert "Travel progress | run 1/2" in output
+    assert "Travel progress | run 2/2" in output
+    assert "overall: 1/2 done, 1 left" in output
+    assert "overall: 2/2 done, 0 left" in output
+
+
+def test_travel_run_agent_inference_flushes_langfuse(monkeypatch, tmp_path):
+    cleanup_calls: list[str] = []
+
+    async def fake_run_agent_inference_async(**kwargs):
+        return {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "elapsed_time": 0,
+            "results": [],
+        }
+
+    def fake_flush() -> None:
+        cleanup_calls.append("travel")
+
+    monkeypatch.setattr(
+        travel_module, "run_agent_inference_async", fake_run_agent_inference_async
+    )
+    monkeypatch.setattr(travel_module, "flush_langfuse", fake_flush)
+
+    results = travel_module.run_agent_inference(
+        model="qwen-plus",
+        language="en",
+        test_data_path=tmp_path / "travel_samples.json",
+        database_dir=TRAVEL_DATABASE_DIR,
+        tool_schema_path=TRAVEL_SCHEMA_PATH,
+        output_dir=tmp_path / "travel_output",
+        workers=1,
+        max_llm_calls=1,
+        runs=1,
+        system="A",
+    )
+
+    assert results["total"] == 0
+    assert cleanup_calls == ["travel"]
+
+
+def test_travel_run_agent_inference_logs_structured_task_error(monkeypatch, tmp_path):
+    test_data_path = tmp_path / "travel_samples.json"
+    test_data_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": 0,
+                    "query": "test travel query",
+                    "meta_info": {"days": 2},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeTravelRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            raise RuntimeError("travel boom")
+
+    monkeypatch.setattr(travel_module, "TravelAgentRunner", FakeTravelRunner)
+
+    output_dir = tmp_path / "travel_output"
+    results = travel_module.run_agent_inference(
+        model="qwen-plus",
+        language="en",
+        test_data_path=test_data_path,
+        database_dir=TRAVEL_DATABASE_DIR,
+        tool_schema_path=TRAVEL_SCHEMA_PATH,
+        output_dir=output_dir,
+        workers=1,
+        max_llm_calls=1,
+        system="A",
+    )
+
+    assert results["failed"] == 1
+    records = _load_jsonl(output_dir / "agent_events.jsonl")
+    task_results = _load_jsonl(output_dir / "task_results.jsonl")
+    assert records[0]["event_type"] == "task_error"
+    assert records[0]["failure_subtype"] == "none"
+    assert records[0]["error"]["type"] == "RuntimeError"
+    assert records[0]["error"]["message"] == "travel boom"
+    assert "travel boom" in records[0]["error"]["traceback"]
+    assert task_results[0]["success"] is False
+    assert task_results[0]["failure_subtype"] == "none"
+    assert task_results[0]["error"]["message"] == "travel boom"
 
 
 def test_travel_run_agent_inference_serializes_tool_calls_in_trajectory(
@@ -624,21 +1083,130 @@ def test_travel_run_agent_inference_serializes_tool_calls_in_trajectory(
     )
 
 
-def test_benchmark_wrapper_forwards_runs_to_domain_scripts(monkeypatch):
-    from deepplanning import orchestration as orchestration_module
+def test_travel_run_agent_inference_scopes_trace_per_case(monkeypatch, tmp_path):
+    test_data_path = tmp_path / "travel_samples.json"
+    test_data_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": 0,
+                    "query": "test travel query 0",
+                    "meta_info": {"days": 2},
+                },
+                {
+                    "id": 1,
+                    "query": "test travel query 1",
+                    "meta_info": {"days": 3},
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
 
-    shopping_calls: list[Path] = []
-    travel_calls: list[Path] = []
+    captured_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        travel_module,
+        "build_langfuse_trace_id",
+        lambda *parts: "|".join(str(part) for part in parts),
+    )
+    monkeypatch.setattr(
+        travel_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_1",
+                            "query_train_info",
+                            '{"departure":"A","arrival":"B"}',
+                        )
+                    ],
+                    prompt_tokens=20,
+                    completion_tokens=7,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="<think>reasoning</think><plan>Day 1 itinerary</plan>",
+                    prompt_tokens=11,
+                    completion_tokens=5,
+                ),
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_2",
+                            "query_train_info",
+                            '{"departure":"C","arrival":"D"}',
+                        )
+                    ],
+                    prompt_tokens=21,
+                    completion_tokens=7,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="<think>reasoning</think><plan>Day 2 itinerary</plan>",
+                    prompt_tokens=12,
+                    completion_tokens=5,
+                ),
+            ],
+            captured_calls,
+        ),
+    )
+    monkeypatch.setattr(
+        travel_module.TravelAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: '{"status":"ok"}',
+    )
+
+    results = travel_module.run_agent_inference(
+        model="qwen-plus",
+        language="en",
+        test_data_path=test_data_path,
+        database_dir=TRAVEL_DATABASE_DIR,
+        tool_schema_path=TRAVEL_SCHEMA_PATH,
+        output_dir=tmp_path / "travel_output",
+        workers=1,
+        max_llm_calls=2,
+        runs=1,
+        system="A",
+        session_id="bench-session",
+    )
+
+    assert results["success"] == 2
+    assert [call["trace_id"] for call in captured_calls] == [
+        "bench-session|travel|qwen-plus|0|0",
+        "bench-session|travel|qwen-plus|0|0",
+        "bench-session|travel|qwen-plus|0|1",
+        "bench-session|travel|qwen-plus|0|1",
+    ]
+    assert {call["session_id"] for call in captured_calls} == {"bench-session"}
+
+
+def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeypatch):
+    shopping_calls: list[dict[str, object]] = []
+    travel_calls: list[dict[str, object]] = []
     aggregate_roots: list[Path | None] = []
     monkeypatch.setattr(
         orchestration_module,
         "run_shopping",
-        lambda **kwargs: shopping_calls.append(kwargs["output_root"]),
+        lambda **kwargs: shopping_calls.append(
+            {
+                "output_root": kwargs["output_root"],
+                "langfuse_session_id": kwargs["langfuse_session_id"],
+            }
+        ),
     )
     monkeypatch.setattr(
         orchestration_module,
         "run_travel",
-        lambda **kwargs: travel_calls.append(kwargs["output_root"]),
+        lambda **kwargs: travel_calls.append(
+            {
+                "output_root": kwargs["output_root"],
+                "langfuse_session_id": kwargs["langfuse_session_id"],
+            }
+        ),
     )
     monkeypatch.setattr(
         orchestration_module,
@@ -647,34 +1215,38 @@ def test_benchmark_wrapper_forwards_runs_to_domain_scripts(monkeypatch):
             benchmark_output_root
         ),
     )
-    monkeypatch.setattr(
-        orchestration_module,
-        "compose_config",
-        lambda config_name, overrides: OmegaConf.create(
-            {
-                "domains": ["travel", "shopping"],
-                "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
-                "system": {"name": "A"},
-                "runtime": {"workers": 1, "max_llm_calls": 20, "runs": 4},
-                "shopping": {"levels": [1], "sample_ids": ["0"]},
-                "travel": {
-                    "language": "en",
-                    "start_from": "inference",
-                    "evaluation_mode": "auto",
-                    "sample_ids": ["0"],
-                    "verbose": False,
-                    "debug": False,
-                },
-                "output_root": str(Path("/tmp") / "bench-session"),
-                "session_root": "",
-            }
-        ),
+    cfg = OmegaConf.create(
+        {
+            "domains": ["travel", "shopping"],
+            "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
+            "system": {"name": "A"},
+            "runtime": {"workers": 1, "max_llm_calls": 20, "runs": 4},
+            "shopping": {"levels": [1], "sample_ids": ["0"]},
+            "travel": {
+                "language": "en",
+                "start_from": "inference",
+                "evaluation_mode": "auto",
+                "sample_ids": ["0"],
+                "verbose": False,
+                "debug": False,
+            },
+        }
     )
 
-    benchmark_script.run(runs=4, output_root=str(Path("/tmp") / "bench-session"))
+    orchestration_module.run_benchmark_from_cfg(cfg, Path("/tmp") / "bench-session")
 
-    assert shopping_calls == [Path("/tmp") / "bench-session" / "shopping"]
-    assert travel_calls == [Path("/tmp") / "bench-session" / "travel"]
+    assert shopping_calls == [
+        {
+            "output_root": Path("/tmp") / "bench-session" / "shopping",
+            "langfuse_session_id": "bench-session",
+        }
+    ]
+    assert travel_calls == [
+        {
+            "output_root": Path("/tmp") / "bench-session" / "travel",
+            "langfuse_session_id": "bench-session",
+        }
+    ]
     assert aggregate_roots == [Path("/tmp") / "bench-session"]
 
 
@@ -780,19 +1352,35 @@ def test_real_hydra_composes_named_experiment_config():
     assert str(cfg.system.name) == "A"
 
 
+def test_run_experiment_script_reaches_argument_validation_without_import_failure():
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "run_experiment.py")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    combined_output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert "ModuleNotFoundError" not in combined_output
+    assert "Experiment runs require an explicit 'name'." in combined_output
+
+
 def test_checked_in_system_a_smoke_config_uses_existing_benchmark_sample_ids():
     config_path = REPO_ROOT / "configs" / "experiments" / "system_a_smoke.yaml"
     config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
 
     shopping_sample_ids = parse_id_list(config["shopping"]["sample_ids"])
     shopping_samples = load_json_file(
-        shopping_script.SHOPPING_ROOT
+        shopping_runtime_module.SHOPPING_ROOT
         / "data"
         / f"level_{config['shopping']['levels'][0]}_query_meta.json"
     )
     travel_sample_ids = parse_id_list(config["travel"]["sample_ids"])
     travel_samples = load_json_file(
-        travel_script.TRAVEL_ROOT
+        travel_runtime_module.TRAVEL_ROOT
         / "data"
         / f"travelplanning_query_{config['travel']['language']}.json"
     )
@@ -809,16 +1397,16 @@ def test_travel_wrapper_converts_and_evaluates_each_run(monkeypatch, tmp_path):
         json.dumps([{"id": 0, "query": "test"}]), encoding="utf-8"
     )
 
-    monkeypatch.setattr(travel_script, "TRAVEL_DATA_ROOT", travel_db_root)
+    monkeypatch.setattr(travel_runtime_module, "TRAVEL_DATA_ROOT", travel_db_root)
     monkeypatch.setattr(
-        travel_script,
+        travel_runtime_module,
         "prepare_test_data",
         lambda language, output_dir, sample_ids: test_data_path,
     )
 
     inference_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        travel_script.travel_runner,
+        travel_runtime_module.travel_agent_runner,
         "run_agent_inference",
         lambda **kwargs: inference_calls.append(kwargs) or {"success": 2, "total": 2},
     )
@@ -892,7 +1480,7 @@ def test_travel_wrapper_converts_and_evaluates_each_run(monkeypatch, tmp_path):
         evaluation_mode="auto",
     )
 
-    travel_script.run_language(
+    travel_runtime_module.run_language(
         model="qwen3-14b",
         language="en",
         sample_ids=["0"],
@@ -935,9 +1523,9 @@ def test_travel_wrapper_writes_generated_data_only_summary_on_conversion_failure
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(travel_script, "TRAVEL_DATA_ROOT", travel_db_root)
+    monkeypatch.setattr(travel_runtime_module, "TRAVEL_DATA_ROOT", travel_db_root)
     monkeypatch.setattr(
-        travel_script,
+        travel_runtime_module,
         "prepare_test_data",
         lambda language, output_dir, sample_ids: test_data_path,
     )
@@ -969,7 +1557,7 @@ def test_travel_wrapper_writes_generated_data_only_summary_on_conversion_failure
         return {"success": 1, "total": 1}
 
     monkeypatch.setattr(
-        travel_script.travel_runner, "run_agent_inference", fake_inference
+        travel_runtime_module.travel_agent_runner, "run_agent_inference", fake_inference
     )
 
     class FakeConvert:
@@ -1003,7 +1591,7 @@ def test_travel_wrapper_writes_generated_data_only_summary_on_conversion_failure
         evaluation_mode="auto",
     )
 
-    travel_script.run_language(
+    travel_runtime_module.run_language(
         model="qwen3-14b",
         language="en",
         sample_ids=["0"],
@@ -1036,7 +1624,6 @@ def test_travel_wrapper_writes_generated_data_only_summary_on_conversion_failure
 
 
 def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
-    from deepplanning import orchestration as orchestration_module
     from deepplanning import shopping_runner as shopping_runtime_module
 
     (tmp_path / "database_level1").mkdir()
@@ -1054,29 +1641,6 @@ def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
         lambda: (object(), object()),
     )
     monkeypatch.setattr(shopping_runtime_module, "load_model_config", lambda model: {})
-    monkeypatch.setattr(
-        orchestration_module,
-        "compose_config",
-        lambda config_name, overrides: OmegaConf.create(
-            {
-                "domains": ["shopping"],
-                "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
-                "system": {"name": "A"},
-                "runtime": {"workers": 1, "max_llm_calls": 2, "runs": 2},
-                "shopping": {"levels": [1], "sample_ids": []},
-                "travel": {
-                    "language": "en",
-                    "start_from": "inference",
-                    "evaluation_mode": "auto",
-                    "sample_ids": [],
-                    "verbose": False,
-                    "debug": False,
-                },
-                "output_root": str(tmp_path / "shopping_output"),
-                "session_root": "",
-            }
-        ),
-    )
 
     prepared_databases: list[Path] = []
 
@@ -1117,7 +1681,9 @@ def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
         ),
     )
 
-    shopping_script.run(runs=2)
+    shopping_runtime_module.run(
+        levels=[1], runs=2, output_root=tmp_path / "shopping_output"
+    )
 
     assert inference_calls[0]["runs"] == 2
     assert sorted(inference_calls[0]["database_dir_by_run"]) == [0, 1]
@@ -1153,7 +1719,9 @@ def test_aggregate_results_keeps_travel_fallback_artifacts_under_session_root(tm
         encoding="utf-8",
     )
 
-    benchmark_script.aggregate_results("qwen3-14b", benchmark_output_root=session_root)
+    aggregation_module.aggregate_results(
+        "qwen3-14b", benchmark_output_root=session_root
+    )
 
     aggregated = json.loads(
         (

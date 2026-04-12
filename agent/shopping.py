@@ -9,11 +9,26 @@ from pathlib import Path
 from typing import Any
 
 from experiment import StructuredLogger, build_system_config, run_experiment
-from llm import call_chat_completion, extract_usage_tokens
+from experiment.logging import serialize_exception
+from experiment.progress import InferenceProgressReporter
+from failure_subtypes import (
+    classify_exception_failure_subtype,
+    failure_subtype_from_stop_reason,
+)
+from llm import (
+    build_langfuse_trace_id,
+    call_chat_completion,
+    extract_usage_tokens,
+    flush_langfuse,
+)
 from oversight import ConversationState, apply_intervention, evaluate_oversight
 
 from .base import TaskResult
-from .vendor import load_shopping_agent_class, load_shopping_prompt
+from .vendor import (
+    clear_vendored_tool_module_cache,
+    load_shopping_agent_class,
+    load_shopping_prompt,
+)
 
 VendorShoppingFnAgent = load_shopping_agent_class()
 
@@ -100,7 +115,17 @@ def _resolve_run_output_dir(
     return base_output_dir
 
 
+def _error_summary(error_payload: dict[str, Any]) -> str:
+    error_type = error_payload.get("type", "Error")
+    message = str(error_payload.get("message", "")).strip()
+    return f"{error_type}: {message}" if message else str(error_type)
+
+
 class ShoppingAgentRunner(VendorShoppingFnAgent):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        clear_vendored_tool_module_cache()
+        super().__init__(*args, **kwargs)
+
     async def run_task(
         self,
         user_query: str,
@@ -112,6 +137,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         save_messages: bool = True,
         sample_id: str | None = None,
         messages_output_dir: str | None = None,
+        trace_id: str | None = None,
+        session_id: str | None = None,
     ) -> TaskResult:
         state.begin()
 
@@ -146,6 +173,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             stop_on_no_calls=False,
             save_messages=save_messages,
             messages_file=messages_file,
+            trace_id=trace_id,
+            session_id=session_id,
         )
         messages = self._add_to_cart(messages)
         messages, phase_stop_reason = await self._run_phase(
@@ -158,6 +187,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             stop_on_no_calls=True,
             save_messages=save_messages,
             messages_file=messages_file,
+            trace_id=trace_id,
+            session_id=session_id,
         )
 
         final_output = _extract_final_output(messages)
@@ -191,15 +222,54 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         stop_on_no_calls: bool,
         save_messages: bool,
         messages_file: Path | None,
+        trace_id: str | None,
+        session_id: str | None,
     ) -> tuple[list[Any], str]:
         for step_count in range(1, system_config.max_steps + 1):
             request_messages = list(messages)
             started_at = time.time()
+
+            async def log_attempt_error(
+                payload: dict[str, Any],
+                *,
+                step: int = step_count,
+                phase: str = phase_name,
+                task_id: str = state.task_id,
+                model_alias: str = system_config.executor_provider.alias,
+            ) -> None:
+                error_payload = payload.get("error", {})
+                retry_note = (
+                    "retrying" if payload.get("will_retry") else "no retries left"
+                )
+                print(
+                    "⚠️  Shopping LLM call failed "
+                    f"(sample={task_id}, run={run_id}, phase={phase}, "
+                    f"step={step}, attempt={payload.get('attempt')}/{payload.get('max_attempts')}, "
+                    f"{retry_note}): {_error_summary(error_payload)}"
+                )
+                if logger is None:
+                    return
+                await logger.log_event(
+                    "executor_llm_error",
+                    {
+                        "domain": "shopping",
+                        "task_id": task_id,
+                        "run_id": run_id,
+                        "phase": phase,
+                        "step": step,
+                        "model_alias": model_alias,
+                        **payload,
+                    },
+                )
+
             response = await call_chat_completion(
                 provider=system_config.executor_provider,
                 messages=request_messages,
                 tools=self.openai_tools,
                 reasoning_enabled=_executor_reasoning_enabled(system_config),
+                on_attempt_error=log_attempt_error,
+                trace_id=trace_id,
+                session_id=session_id,
             )
             ended_at = time.time()
             state.record_executor_call(response)
@@ -333,6 +403,8 @@ async def run_agent_inference_async(
     system: str = "A",
     database_dir_by_run: dict[int, Path] | None = None,
     output_dir_by_run: dict[int, Path] | None = None,
+    trace_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     with test_data_path.open("r", encoding="utf-8") as fh:
         test_data = json.load(fh)
@@ -360,7 +432,14 @@ async def run_agent_inference_async(
     print(f"{'=' * 80}")
     print(f"Model: {model}")
     print(f"Samples: {len(test_data)}")
+    print(f"Runs: {runs}")
     print(f"Workers: {workers}")
+    progress = InferenceProgressReporter(
+        domain="shopping",
+        samples_per_run=len(test_data),
+        runs=runs,
+    )
+    print(f"Execution mode: {progress.execution_mode(workers)}")
     print(f"{'=' * 80}\n")
 
     system_config = build_system_config(
@@ -403,10 +482,18 @@ async def run_agent_inference_async(
             complexity=int(sample.get("level", 0) or 0) or None,
             system_config_name=system,
         )
+        logger: StructuredLogger | None = None
 
         try:
             run_database_dir = resolve_run_database_dir(run_id)
             logger = get_logger(run_id)
+            sample_trace_id = trace_id or build_langfuse_trace_id(
+                session_id,
+                "shopping",
+                model,
+                run_id,
+                sample_id,
+            )
             runner = ShoppingAgentRunner(
                 model=system_config.executor_provider.alias,
                 sample_id=sample_id,
@@ -422,6 +509,11 @@ async def run_agent_inference_async(
                 run_id=run_id,
                 save_messages=True,
                 sample_id=sample_id,
+                trace_id=sample_trace_id,
+                session_id=session_id,
+            )
+            failure_subtype = failure_subtype_from_stop_reason(
+                result.state.final_stop_reason
             )
             await logger.log_result(
                 {
@@ -430,10 +522,17 @@ async def run_agent_inference_async(
                     "run_id": run_id,
                     "system": system,
                     "domain": "shopping",
+                    "success": True,
+                    "failure_subtype": failure_subtype,
                     "final_output": result.output,
                 }
             )
-            print(f"✅ Sample {sample_id} completed in {state.wall_time_seconds:.2f}s")
+            await progress.record_completion(
+                run_id=run_id,
+                sample_id=sample_id,
+                success=True,
+                elapsed_seconds=state.wall_time_seconds,
+            )
             return {
                 "id": sample_id,
                 "query": query,
@@ -441,24 +540,55 @@ async def run_agent_inference_async(
                 "messages": result.messages,
                 "elapsed_time": state.wall_time_seconds,
                 "success": True,
+                "failure_subtype": failure_subtype,
             }
         except Exception as exc:
-            await logger.log_event(
-                "task_error",
-                {
-                    "domain": "shopping",
-                    "task_id": sample_id,
-                    "run_id": run_id,
-                    "error": str(exc),
-                },
+            if not state.end_time:
+                state.finish()
+            error_payload = serialize_exception(exc)
+            failure_subtype = classify_exception_failure_subtype(exc)
+            if logger is None:
+                try:
+                    logger = get_logger(run_id)
+                except Exception:
+                    logger = None
+            if logger is not None:
+                await logger.log_event(
+                    "task_error",
+                    {
+                        "domain": "shopping",
+                        "task_id": sample_id,
+                        "run_id": run_id,
+                        "failure_subtype": failure_subtype,
+                        "error": error_payload,
+                    },
+                )
+                await logger.log_result(
+                    {
+                        **state.to_metrics(),
+                        "task_id": sample_id,
+                        "run_id": run_id,
+                        "system": system,
+                        "domain": "shopping",
+                        "success": False,
+                        "failure_subtype": failure_subtype,
+                        "final_output": None,
+                        "error": error_payload,
+                    }
+                )
+            await progress.record_completion(
+                run_id=run_id,
+                sample_id=sample_id,
+                success=False,
+                error_summary=_error_summary(error_payload),
             )
-            print(f"❌ Sample {sample_id} failed: {exc}")
             traceback.print_exc()
             return {
                 "id": sample_id,
                 "query": query,
                 "success": False,
-                "error": str(exc),
+                "failure_subtype": failure_subtype,
+                "error": error_payload.get("message", str(exc)),
             }
 
     raw_results = await run_experiment(
@@ -496,21 +626,29 @@ def run_agent_inference(
     system: str = "A",
     database_dir_by_run: dict[int, Path] | None = None,
     output_dir_by_run: dict[int, Path] | None = None,
+    trace_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    return asyncio.run(
-        run_agent_inference_async(
-            model=model,
-            test_data_path=test_data_path,
-            database_dir=database_dir,
-            tool_schema_path=tool_schema_path,
-            system_prompt=system_prompt,
-            output_dir=output_dir,
-            workers=workers,
-            max_llm_calls=max_llm_calls,
-            runs=runs,
-            rerun_ids=rerun_ids,
-            system=system,
-            database_dir_by_run=database_dir_by_run,
-            output_dir_by_run=output_dir_by_run,
-        )
-    )
+    async def _run_with_cleanup() -> dict[str, Any]:
+        try:
+            return await run_agent_inference_async(
+                model=model,
+                test_data_path=test_data_path,
+                database_dir=database_dir,
+                tool_schema_path=tool_schema_path,
+                system_prompt=system_prompt,
+                output_dir=output_dir,
+                workers=workers,
+                max_llm_calls=max_llm_calls,
+                runs=runs,
+                rerun_ids=rerun_ids,
+                system=system,
+                database_dir_by_run=database_dir_by_run,
+                output_dir_by_run=output_dir_by_run,
+                trace_id=trace_id,
+                session_id=session_id,
+            )
+        finally:
+            flush_langfuse()
+
+    return asyncio.run(_run_with_cleanup())
