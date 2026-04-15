@@ -299,6 +299,61 @@ def test_call_chat_completion_preserves_model_config_reasoning_when_unset(
     }
 
 
+def test_provider_config_from_model_name_loads_logprobs_for_qwen():
+    provider = llm_client.ProviderConfig.from_model_name("qwen3.5-9b")
+
+    assert provider.logprobs is True
+    assert provider.top_logprobs == 5
+
+
+def test_call_chat_completion_forwards_logprobs_from_model_config(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+    provider = llm_client.ProviderConfig(
+        alias="qwen3.5-9b",
+        model="qwen/qwen3.5-9b",
+        provider="openai",
+        logprobs=True,
+        top_logprobs=5,
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=provider,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert captured_params[0]["logprobs"] is True
+    assert captured_params[0]["top_logprobs"] == 5
+
+
+def test_call_chat_completion_rejects_top_logprobs_without_logprobs():
+    provider = llm_client.ProviderConfig(
+        alias="alias",
+        model="test-model",
+        logprobs=False,
+        top_logprobs=5,
+    )
+
+    with pytest.raises(ValueError, match="top_logprobs requires logprobs"):
+        asyncio.run(
+            llm_client.call_chat_completion(
+                provider=provider,
+                messages=[{"role": "user", "content": "hello"}],
+            )
+        )
+
+
 def test_call_chat_completion_retries_only_transport_errors(monkeypatch):
     attempts = 0
 

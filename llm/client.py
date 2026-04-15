@@ -55,6 +55,8 @@ class ProviderConfig:
     api_base: str | None = None
     api_key_env: str | None = None
     temperature: float | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = None
     max_retries: int = 1
     backoff: float = 1.0
     extra_body: dict[str, Any] = field(default_factory=dict)
@@ -69,6 +71,8 @@ class ProviderConfig:
             api_base=config.get("base_url"),
             api_key_env=config.get("api_key_env"),
             temperature=config.get("temperature"),
+            logprobs=config.get("logprobs"),
+            top_logprobs=config.get("top_logprobs"),
             max_retries=max(int(config.get("max_retries", 1)), 1),
             backoff=float(config.get("backoff", 1.0)),
             extra_body=dict(config.get("extra_body") or {}),
@@ -190,6 +194,13 @@ async def call_chat_completion(
         params["tools"] = tools
     if provider.temperature is not None:
         params["temperature"] = provider.temperature
+    if provider.logprobs is not None:
+        params["logprobs"] = provider.logprobs
+    if provider.top_logprobs is not None:
+        if provider.logprobs is False:
+            raise ValueError("top_logprobs requires logprobs to be enabled")
+        params["logprobs"] = True
+        params["top_logprobs"] = provider.top_logprobs
 
     extra_body = _merge_reasoning(provider.extra_body, reasoning_enabled)
     if extra_body:

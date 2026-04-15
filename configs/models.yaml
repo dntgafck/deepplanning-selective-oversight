@@ -4,6 +4,8 @@ models:
     model_type: openai
     base_url: https://api.together.xyz/v1
     api_key_env: TOGETHER_API_KEY
+    logprobs: true
+    top_logprobs: 5
     extra_body:
       reasoning:
         enabled: false
@@ -11,13 +13,13 @@ models:
     backoff: 1.5
 
   deepseek-v3.2:
-    model_name: deepseek/deepseek-v3.2
+    model_name: deepseek-ai/deepseek-v3.2
     model_type: openai
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
     extra_body:
-      reasoning:
-        enabled: true
+      chat_template_kwargs:
+        thinking: true
     max_retries: 30
     backoff: 1.5
 
