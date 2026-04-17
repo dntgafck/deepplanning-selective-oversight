@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Literal
 
 from llm import call_chat_completion, estimate_call_cost
@@ -10,7 +11,6 @@ from .contracts import execution_contract_to_dict, task_checklist_to_dict
 from .state import ConversationState
 from .triggers import (
     build_authoritative_state_snapshot,
-    build_local_guidance_lines,
     classify_mutating_tool,
     compute_coverage_status,
     detect_loop,
@@ -28,25 +28,44 @@ Evaluate the current executor step against:
 
 You are not the primary planner.
 Do not solve the full task.
-Prefer approve when evidence is insufficient.
-Use only the allowed actions.
-Keep corrective guidance short, specific, and action-oriented.
-Output valid JSON only.
+
+Your output has two purposes:
+- diagnose whether the proposed action violates the contract or checklist, and
+- suggest short corrective guidance if it does.
+
+You do not decide whether the action is blocked or allowed. The runtime makes
+that decision based on objective fields in your output.
+
+Return approve for ambiguous or insufficient-evidence cases. Do not assert a
+violation unless you can name the specific contract rule ID or unmet checklist
+key that the proposed action contradicts.
+
+Use only the allowed actions. Keep any corrective guidance short, specific, and
+action-oriented. Output valid JSON only.
 
 Return exactly one JSON object with this shape:
 {
   "action": "approve" | "provide_guidance" | "correct_observation",
-  "decision_summary": "string",
-  "block_current_tool": boolean,
+  "decision_summary": "string, one sentence",
+  "violation_evidence": {
+    "violated_contract_ids": ["string"],
+    "unmet_checklist_keys": ["string"],
+    "confidence": "low" | "medium" | "high"
+  },
   "guidance_lines": ["string"],
   "corrected_observation": "string|null",
-  "violated_contract_ids": ["string"],
-  "unmet_checklist_keys": ["string"]
 }
 
-Conditional rule:
-- if action == "provide_guidance", include usable corrective content in either guidance_lines or corrected_observation
-- never return provide_guidance with both fields empty"""
+Rules:
+- if action == "approve", violation_evidence.violated_contract_ids and
+  unmet_checklist_keys MUST both be empty arrays
+- if action == "provide_guidance" you MAY leave violation_evidence empty
+  (a soft nudge); in that case set confidence to "low"
+- if action == "provide_guidance", include usable corrective content in either
+  guidance_lines or corrected_observation; never return provide_guidance with
+  both empty
+- "Insufficient evidence of correctness" is never grounds for intervention on
+  a reversible mutation. Return approve in that case."""
 
 P3_SYSTEM_PROMPT = """You are the final execution verifier.
 
@@ -61,6 +80,84 @@ DEFAULT_FINAL_NOTICE = (
 )
 
 
+class H1Outcome(str, Enum):
+    APPROVE_CONTINUE = "approve_continue"
+    APPROVE_WITH_NUDGE = "approve_with_nudge"
+    HARD_BLOCK = "hard_block"
+    FORCED_APPROVE = "forced_approve"
+
+
+def _tool_reversibility(tool_name: str, system_config: Any) -> str:
+    irreversible = tuple(getattr(system_config, "irreversible_tools", ()) or ())
+    if tool_name in irreversible:
+        return "irreversible"
+    mutating = tuple(getattr(system_config, "mutating_tools", ()) or ())
+    if tool_name in mutating:
+        return "reversible"
+    return "unknown"
+
+
+def compute_h1_outcome(
+    *,
+    action: "OversightAction",
+    tool_name: str,
+    arguments: Any,
+    state: ConversationState,
+    system_config: Any,
+) -> H1Outcome:
+    mode = str(getattr(system_config, "block_on_mutation_mode", "auto"))
+    if mode == "never":
+        if action.intervention_type == "provide_guidance":
+            return H1Outcome.APPROVE_WITH_NUDGE
+        return H1Outcome.APPROVE_CONTINUE
+    if mode == "always":
+        if action.intervention_type == "provide_guidance":
+            from .state import _hash_arguments
+
+            args_hash_key = _hash_arguments(arguments)
+            prior_blocks = state.blocked_mutation_counts.get(
+                (tool_name, args_hash_key), 0
+            )
+            max_blocks = max(
+                int(getattr(system_config, "max_hard_blocks_per_args", 2)),
+                1,
+            )
+            if prior_blocks >= max_blocks:
+                return H1Outcome.FORCED_APPROVE
+            return H1Outcome.HARD_BLOCK
+        return H1Outcome.APPROVE_CONTINUE
+
+    if action.intervention_type == "approve":
+        return H1Outcome.APPROVE_CONTINUE
+
+    from .state import _hash_arguments
+
+    args_hash_key = _hash_arguments(arguments)
+    prior_blocks = state.blocked_mutation_counts.get((tool_name, args_hash_key), 0)
+    max_blocks = max(int(getattr(system_config, "max_hard_blocks_per_args", 2)), 1)
+    if prior_blocks >= max_blocks:
+        return H1Outcome.FORCED_APPROVE
+
+    has_cited_violation = bool(
+        action.violated_contract_ids or action.unmet_checklist_keys
+    )
+    confidence = str(getattr(action, "violation_confidence", "low") or "low").lower()
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "low"
+    strong_confidence = confidence in {"medium", "high"}
+    tool_reversibility = _tool_reversibility(tool_name, system_config)
+    not_reversible = tool_reversibility in {"irreversible", "unknown"}
+    require_cited = bool(
+        getattr(system_config, "require_cited_violation_for_block", True)
+    )
+    block = (
+        (not require_cited or has_cited_violation)
+        and strong_confidence
+        and not_reversible
+    )
+    return H1Outcome.HARD_BLOCK if block else H1Outcome.APPROVE_WITH_NUDGE
+
+
 @dataclass(slots=True)
 class OversightAction:
     should_intervene: bool = False
@@ -73,6 +170,7 @@ class OversightAction:
     notice_text: str | None = None
     violated_contract_ids: list[str] = field(default_factory=list)
     unmet_checklist_keys: list[str] = field(default_factory=list)
+    violation_confidence: str = "low"
     overseer_invoked: bool = False
     overseer_mode: str = "disabled"
     overseer_input_tokens: int = 0
@@ -93,6 +191,7 @@ class OversightAction:
     blocked_mutation_repeat_count: int = 0
     terminate_phase: bool = False
     termination_reason: str | None = None
+    h1_outcome: str | None = None
 
 
 def _overseer_mode(system_config: Any) -> str:
@@ -150,20 +249,31 @@ def parse_runtime_overseer_json(payload: str | dict[str, Any]) -> dict[str, Any]
         if data.get("corrected_observation") is None
         else str(data.get("corrected_observation")).strip() or None
     )
+    evidence = data.get("violation_evidence") or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    violated_contract_ids = _coerce_string_list(
+        evidence.get("violated_contract_ids", data.get("violated_contract_ids", []))
+    )
+    unmet_checklist_keys = _coerce_string_list(
+        evidence.get("unmet_checklist_keys", data.get("unmet_checklist_keys", []))
+    )
+    confidence = str(evidence.get("confidence", "low")).strip().lower()
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "low"
+    if action == "approve":
+        violated_contract_ids = []
+        unmet_checklist_keys = []
+        confidence = "low"
     return {
         "action": action,
         "decision_summary": str(data.get("decision_summary", "") or ""),
         "block_current_tool": bool(data.get("block_current_tool", False)),
         "guidance_lines": guidance_lines,
         "corrected_observation": corrected_observation,
-        "violated_contract_ids": [
-            str(item)
-            for item in _coerce_string_list(data.get("violated_contract_ids", []))
-        ],
-        "unmet_checklist_keys": [
-            str(item)
-            for item in _coerce_string_list(data.get("unmet_checklist_keys", []))
-        ],
+        "violated_contract_ids": violated_contract_ids,
+        "unmet_checklist_keys": unmet_checklist_keys,
+        "violation_confidence": confidence,
         "missing_corrective_content": (
             action == "provide_guidance"
             and not guidance_lines
@@ -246,8 +356,10 @@ def _render_notice_from_action(action: OversightAction) -> str | None:
 
     lines = list(action.guidance_lines)
     if action.corrected_observation:
-        action.notice_source = "corrected_observation"
-        lines = [action.corrected_observation]
+        action.notice_source = (
+            "corrected_observation_plus_guidance" if lines else "corrected_observation"
+        )
+        lines = lines + [action.corrected_observation]
     elif lines:
         action.notice_source = (
             "local_fallback" if action.fallback_guidance_used else "guidance_lines"
@@ -293,74 +405,6 @@ def _coverage_guidance_lines(
     return descriptions or [
         f"Inspect checklist target: {key}" for key in missing_keys[:3]
     ]
-
-
-def _blocked_mutation_limit_action(
-    *,
-    call: dict[str, Any],
-    state: ConversationState,
-    system_config: Any,
-) -> OversightAction | None:
-    if (
-        state.blocked_mutation_repeat_count <= 0
-        or state.last_blocked_mutation_tool_name != str(call.get("name") or "")
-        or state.last_blocked_mutation_arguments_normalized is None
-    ):
-        return None
-
-    similarity_result = detect_loop(
-        current_tool_name=str(call.get("name") or ""),
-        current_arguments=call.get("arguments"),
-        recent_tool_history=[
-            {
-                "tool_name": state.last_blocked_mutation_tool_name,
-                "arguments_normalized": state.last_blocked_mutation_arguments_normalized,
-            }
-        ],
-        similarity_threshold=float(
-            getattr(system_config, "loop_similarity_threshold", 0.92)
-        ),
-        window_size=1,
-        repeat_threshold=2,
-    )
-    if not similarity_result["would_trigger"]:
-        return None
-
-    next_repeat_count = state.blocked_mutation_repeat_count + 1
-    repeat_limit = max(int(getattr(system_config, "loop_repeat_count", 3)), 2)
-    if next_repeat_count < repeat_limit:
-        return None
-
-    tool_name = str(call.get("name") or "")
-    guidance_lines = [
-        (
-            f"Stop repeating the rejected {tool_name} mutation. "
-            "Verify a different candidate or cart state before any new cart change."
-        )
-    ]
-    action = OversightAction(
-        should_intervene=True,
-        trigger_type="loop_detection",
-        trigger_reason="repeated blocked mutation proposal exceeded the local safety limit",
-        intervention_type="provide_guidance",
-        block_current_tool=True,
-        guidance_lines=guidance_lines,
-        overseer_invoked=False,
-        overseer_mode=_overseer_mode(system_config),
-        decision_summary=(
-            "Local blocked-mutation guard terminated a repeated rejected mutation "
-            f"pattern after {next_repeat_count} similar proposals."
-        ),
-        blocked_tool_name=tool_name,
-        blocked_tool_arguments=call.get("arguments"),
-        blocked_tool_arguments_normalized=normalize_arguments(call.get("arguments")),
-        blocked_mutation_repeat_count=next_repeat_count,
-        terminate_phase=True,
-        termination_reason="repeated_blocked_mutation",
-        loop_signature=similarity_result["loop_signature"],
-    )
-    action.notice_text = _render_notice_from_action(action)
-    return action
 
 
 def _activation_enabled(*, state: ConversationState, system_config: Any) -> bool:
@@ -453,11 +497,13 @@ async def _invoke_runtime_overseer(
                             "response_schema": {
                                 "action": allowed_actions,
                                 "decision_summary": "string",
-                                "block_current_tool": "boolean",
+                                "violation_evidence": {
+                                    "violated_contract_ids": ["string"],
+                                    "unmet_checklist_keys": ["string"],
+                                    "confidence": "low|medium|high",
+                                },
                                 "guidance_lines": ["string"],
                                 "corrected_observation": "string|null",
-                                "violated_contract_ids": ["string"],
-                                "unmet_checklist_keys": ["string"],
                             },
                         },
                         ensure_ascii=False,
@@ -505,11 +551,12 @@ async def _invoke_runtime_overseer(
             trigger_type=trigger_type,
             trigger_reason=trigger_reason,
             intervention_type=parsed["action"],
-            block_current_tool=bool(parsed["block_current_tool"]),
+            block_current_tool=False,
             guidance_lines=guidance_lines,
             corrected_observation=corrected_observation,
             violated_contract_ids=list(parsed["violated_contract_ids"]),
             unmet_checklist_keys=list(parsed["unmet_checklist_keys"]),
+            violation_confidence=str(parsed["violation_confidence"]),
             overseer_invoked=True,
             overseer_mode=_overseer_mode(system_config),
             overseer_input_tokens=prompt_tokens,
@@ -678,13 +725,6 @@ async def _evaluate_oversight_impl(
                 mutating_tools=getattr(system_config, "mutating_tools", ()),
             )
             if classification["is_mutating"]:
-                blocked_limit_action = _blocked_mutation_limit_action(
-                    call=call,
-                    state=state,
-                    system_config=system_config,
-                )
-                if blocked_limit_action is not None:
-                    return blocked_limit_action
                 action = await _invoke_runtime_overseer(
                     trigger_type="mutating_action",
                     allowed_actions=["approve", "provide_guidance"],
@@ -699,14 +739,11 @@ async def _evaluate_oversight_impl(
                     trigger_reason=f"mutating tool proposed: {classification['tool_name']}",
                     trigger_evidence={"tool_name": classification["tool_name"]},
                 )
-                if action.intervention_type == "provide_guidance":
-                    action.block_current_tool = True
-                    action.blocked_tool_name = classification["tool_name"]
-                    action.blocked_tool_arguments = call.get("arguments")
-                    action.blocked_tool_arguments_normalized = normalize_arguments(
-                        call.get("arguments")
-                    )
-                    action.notice_text = _render_notice_from_action(action)
+                action.blocked_tool_name = classification["tool_name"]
+                action.blocked_tool_arguments = call.get("arguments")
+                action.blocked_tool_arguments_normalized = normalize_arguments(
+                    call.get("arguments")
+                )
                 return action
 
         for index, call in enumerate(calls):
@@ -737,14 +774,11 @@ async def _evaluate_oversight_impl(
                 trigger_evidence=loop_result,
             )
             action.loop_signature = loop_result["loop_signature"]
-            if action.intervention_type == "provide_guidance":
-                action.block_current_tool = True
-                action.blocked_tool_name = str(call.get("name") or "")
-                action.blocked_tool_arguments = call.get("arguments")
-                action.blocked_tool_arguments_normalized = normalize_arguments(
-                    call.get("arguments")
-                )
-                action.notice_text = _render_notice_from_action(action)
+            action.blocked_tool_name = str(call.get("name") or "")
+            action.blocked_tool_arguments = call.get("arguments")
+            action.blocked_tool_arguments_normalized = normalize_arguments(
+                call.get("arguments")
+            )
             return action
 
         return _noop_action(system_config=system_config)
@@ -884,16 +918,6 @@ async def _apply_intervention_impl(
             or state.pending_executor_notice is None
         ):
             state.pending_executor_notice = notice
-    if (
-        action.intervention_type == "provide_guidance"
-        and action.block_current_tool
-        and action.blocked_tool_name
-        and action.blocked_mutation_repeat_count <= 0
-    ):
-        action.blocked_mutation_repeat_count = state.record_blocked_mutation_attempt(
-            tool_name=action.blocked_tool_name,
-            arguments=action.blocked_tool_arguments,
-        )
 
 
 async def _apply_intervention_compat(
@@ -918,8 +942,10 @@ def apply_intervention(*args: Any, **kwargs: Any) -> Any:
 
 __all__ = [
     "ConversationState",
+    "H1Outcome",
     "OversightAction",
     "apply_intervention",
+    "compute_h1_outcome",
     "evaluate_oversight",
     "parse_final_verifier_json",
     "parse_runtime_overseer_json",

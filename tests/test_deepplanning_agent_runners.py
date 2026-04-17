@@ -706,7 +706,7 @@ def test_shopping_runner_saves_debug_messages_outside_agent_dir_without_sample_i
     assert REPO_ROOT / "agent" not in debug_messages[0].resolve().parents
 
 
-def test_pre_tool_blocked_mutation_does_not_persist_rejected_tool_call_message(
+def test_pre_tool_guidance_for_reversible_mutation_executes_tool_and_injects_notice(
     monkeypatch, tmp_path
 ):
     run_database_dir = tmp_path / "shopping_db"
@@ -735,8 +735,15 @@ def test_pre_tool_blocked_mutation_does_not_persist_rejected_tool_call_message(
                 completion_tokens=5,
             ),
             FakeResponse(
-                content="Final cart answer.",
+                content="",
+                tool_calls=[FakeToolCall("call_2", "get_cart_info", "{}")],
                 prompt_tokens=12,
+                completion_tokens=6,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=13,
                 completion_tokens=6,
             ),
         ],
@@ -765,6 +772,13 @@ def test_pre_tool_blocked_mutation_does_not_persist_rejected_tool_call_message(
             ),
         ],
         captured_executor_calls=captured_calls,
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: (
+            '{"success": true}' if name == "add_product_to_cart" else '{"items":[]}'
+        ),
     )
 
     runner = shopping_module.ShoppingAgentRunner(
@@ -795,8 +809,8 @@ def test_pre_tool_blocked_mutation_does_not_persist_rejected_tool_call_message(
     )
 
     assert result.output == "Final cart answer."
-    assert state.blocked_mutation_count == 1
-    assert not any(
+    assert state.blocked_mutation_count == 0
+    assert any(
         isinstance(message, dict)
         and message.get("role") == "assistant"
         and message.get("tool_calls")
@@ -816,6 +830,7 @@ def test_pre_tool_blocked_mutation_does_not_persist_rejected_tool_call_message(
         and record.get("trigger_type") == "mutating_action"
     ]
     assert oversight_steps[0]["parsed_payload"]["action"] == "provide_guidance"
+    assert oversight_steps[0]["h1_outcome"] == "approve_with_nudge"
     assert oversight_steps[0]["raw_overseer_text"] is not None
     assert oversight_steps[0]["notice_rendered"] is True
     assert any(
@@ -855,8 +870,15 @@ def test_pre_tool_empty_guidance_uses_local_fallback_and_clears_notice_after_inj
                 completion_tokens=5,
             ),
             FakeResponse(
-                content="Final cart answer.",
+                content="",
+                tool_calls=[FakeToolCall("call_2", "get_cart_info", "{}")],
                 prompt_tokens=12,
+                completion_tokens=6,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=13,
                 completion_tokens=6,
             ),
         ],
@@ -885,6 +907,13 @@ def test_pre_tool_empty_guidance_uses_local_fallback_and_clears_notice_after_inj
             ),
         ],
         captured_executor_calls=captured_calls,
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: (
+            '{"success": true}' if name == "add_product_to_cart" else '{"items":[]}'
+        ),
     )
 
     runner = shopping_module.ShoppingAgentRunner(
@@ -1030,7 +1059,7 @@ def test_post_tool_error_occurrence_sets_pending_notice_without_rewriting_histor
     assert "Retry with a safer search" in follow_up_messages[-1]["content"]
 
 
-def test_repeated_blocked_mutation_terminates_cleanly(monkeypatch, tmp_path):
+def test_repeated_hard_blocks_force_approval_in_always_mode(monkeypatch, tmp_path):
     run_database_dir = tmp_path / "shopping_db"
     shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
 
@@ -1077,6 +1106,35 @@ def test_repeated_blocked_mutation_terminates_cleanly(monkeypatch, tmp_path):
                 completion_tokens=4,
                 finish_reason="tool_calls",
             ),
+            FakeResponse(
+                content="Phase one complete.",
+                prompt_tokens=13,
+                completion_tokens=4,
+            ),
+            FakeResponse(
+                content="",
+                tool_calls=[FakeToolCall("call_4", "get_cart_info", "{}")],
+                prompt_tokens=14,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=15,
+                completion_tokens=4,
+            ),
+            FakeResponse(
+                content="",
+                tool_calls=[FakeToolCall("call_5", "get_cart_info", "{}")],
+                prompt_tokens=16,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=17,
+                completion_tokens=4,
+            ),
         ],
         overseer_responses=[
             _fake_json_response(
@@ -1112,8 +1170,26 @@ def test_repeated_blocked_mutation_terminates_cleanly(monkeypatch, tmp_path):
                     "unmet_checklist_keys": [],
                 }
             ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Final answer approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
         ],
         captured_executor_calls=captured_calls,
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: (
+            '{"success": true}' if name == "add_product_to_cart" else '{"items":[]}'
+        ),
     )
 
     runner = shopping_module.ShoppingAgentRunner(
@@ -1130,6 +1206,7 @@ def test_repeated_blocked_mutation_terminates_cleanly(monkeypatch, tmp_path):
     )
     logger = StructuredLogger(tmp_path / "shopping_logs")
     system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=5)
+    system_config.block_on_mutation_mode = "always"
 
     result = asyncio.run(
         runner.run_task(
@@ -1143,14 +1220,25 @@ def test_repeated_blocked_mutation_terminates_cleanly(monkeypatch, tmp_path):
         )
     )
 
-    assert result.output == ""
-    assert state.final_stop_reason == shopping_module.REPEATED_BLOCK_STOP_REASON
-    assert state.final_output_present is False
+    assert result.output == "Final cart answer."
+    assert state.final_stop_reason == "no_tool_calls"
+    assert state.final_output_present is True
     assert state.max_steps_hit is False
-    assert state.blocked_mutation_count == 3
-    assert len(captured_calls) == 3
+    assert state.blocked_mutation_count == 2
+    assert len(captured_calls) == 8
     records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
-    assert any(
+    oversight_steps = [
+        record
+        for record in records
+        if record["event_type"] == "oversight_step"
+        and record.get("trigger_type") == "mutating_action"
+    ]
+    assert [record["h1_outcome"] for record in oversight_steps] == [
+        "hard_block",
+        "hard_block",
+        "forced_approve",
+    ]
+    assert not any(
         record["event_type"] == "executor_turn"
         and record["stop_reason"] == shopping_module.REPEATED_BLOCK_STOP_REASON
         for record in records

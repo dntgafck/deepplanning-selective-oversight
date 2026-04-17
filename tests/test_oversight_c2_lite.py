@@ -8,7 +8,10 @@ from experiment import build_system_config
 from llm import client as llm_client
 from oversight import (
     ConversationState,
+    H1Outcome,
+    OversightAction,
     apply_intervention,
+    compute_h1_outcome,
     evaluate_oversight,
     parse_final_verifier_json,
     parse_runtime_overseer_json,
@@ -347,20 +350,147 @@ def test_checklist_parser_accepts_valid_p1_json():
 
 
 def test_runtime_overseer_parser_accepts_valid_p2_json():
-    parsed = parse_runtime_overseer_json(
-        {
-            "action": "provide_guidance",
-            "decision_summary": "Need a fresh cart check.",
-            "block_current_tool": True,
-            "guidance_lines": ["Call get_cart_info."],
-            "corrected_observation": None,
-            "violated_contract_ids": ["rule-1"],
-            "unmet_checklist_keys": ["budget:under-1000"],
-        }
-    )
+    payload_v13 = {
+        "action": "provide_guidance",
+        "decision_summary": "Premature mutation",
+        "violation_evidence": {
+            "violated_contract_ids": ["mut.precondition.1"],
+            "unmet_checklist_keys": ["item:nike_orange_footwear"],
+            "confidence": "medium",
+        },
+        "guidance_lines": ["Verify product category before adding to cart."],
+        "corrected_observation": None,
+    }
+    parsed = parse_runtime_overseer_json(payload_v13)
 
     assert parsed["action"] == "provide_guidance"
-    assert parsed["block_current_tool"] is True
+    assert parsed["violated_contract_ids"] == ["mut.precondition.1"]
+    assert parsed["unmet_checklist_keys"] == ["item:nike_orange_footwear"]
+    assert parsed["violation_confidence"] == "medium"
+    assert parsed["missing_corrective_content"] is False
+
+    payload_v12 = {
+        "action": "provide_guidance",
+        "decision_summary": "Premature mutation",
+        "block_current_tool": True,
+        "violated_contract_ids": ["mut.precondition.1"],
+        "unmet_checklist_keys": ["item:nike_orange_footwear"],
+        "guidance_lines": ["Verify product category before adding to cart."],
+        "corrected_observation": None,
+    }
+    parsed_v12 = parse_runtime_overseer_json(payload_v12)
+
+    assert parsed_v12["action"] == "provide_guidance"
+    assert parsed_v12["block_current_tool"] is True
+    assert parsed_v12["violated_contract_ids"] == parsed["violated_contract_ids"]
+    assert parsed_v12["unmet_checklist_keys"] == parsed["unmet_checklist_keys"]
+    assert parsed_v12["violation_confidence"] == "low"
+
+
+def test_h1_gate_approves_reversible_mutation_by_default():
+    action = OversightAction(
+        intervention_type="provide_guidance",
+        violated_contract_ids=[],
+        unmet_checklist_keys=[],
+        violation_confidence="low",
+    )
+    state = ConversationState(
+        task_id="t1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_cfg = SimpleNamespace(
+        mutating_tools=("add_product_to_cart",),
+        irreversible_tools=(),
+        block_on_mutation_mode="auto",
+        max_hard_blocks_per_args=2,
+        require_cited_violation_for_block=True,
+        overseer_call_budget_per_task=8,
+    )
+
+    outcome = compute_h1_outcome(
+        action=action,
+        tool_name="add_product_to_cart",
+        arguments={"product_id": "p1"},
+        state=state,
+        system_config=system_cfg,
+    )
+
+    assert outcome == H1Outcome.APPROVE_WITH_NUDGE
+
+
+def test_h1_gate_escalates_to_forced_approve_after_cap():
+    action = OversightAction(
+        intervention_type="provide_guidance",
+        violated_contract_ids=["c.1"],
+        unmet_checklist_keys=[],
+        violation_confidence="high",
+    )
+    state = ConversationState(
+        task_id="t1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    args = {"product_id": "p1"}
+
+    from oversight.state import _hash_arguments
+
+    state.blocked_mutation_counts[
+        ("irreversible_book_flight", _hash_arguments(args))
+    ] = 2
+    system_cfg = SimpleNamespace(
+        mutating_tools=("irreversible_book_flight",),
+        irreversible_tools=("irreversible_book_flight",),
+        block_on_mutation_mode="auto",
+        max_hard_blocks_per_args=2,
+        require_cited_violation_for_block=True,
+        overseer_call_budget_per_task=8,
+    )
+
+    outcome = compute_h1_outcome(
+        action=action,
+        tool_name="irreversible_book_flight",
+        arguments=args,
+        state=state,
+        system_config=system_cfg,
+    )
+
+    assert outcome == H1Outcome.FORCED_APPROVE
+
+
+def test_h1_gate_always_mode_restores_v12_semantics():
+    action = OversightAction(
+        intervention_type="provide_guidance",
+        violated_contract_ids=[],
+        unmet_checklist_keys=[],
+        violation_confidence="low",
+    )
+    state = ConversationState(
+        task_id="t1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_cfg = SimpleNamespace(
+        mutating_tools=("add_product_to_cart",),
+        irreversible_tools=(),
+        block_on_mutation_mode="always",
+        max_hard_blocks_per_args=2,
+        require_cited_violation_for_block=True,
+        overseer_call_budget_per_task=8,
+    )
+
+    outcome = compute_h1_outcome(
+        action=action,
+        tool_name="add_product_to_cart",
+        arguments={"product_id": "p1"},
+        state=state,
+        system_config=system_cfg,
+    )
+
+    assert outcome == H1Outcome.HARD_BLOCK
 
 
 def test_runtime_overseer_empty_guidance_uses_local_fallback_notice(monkeypatch):
@@ -424,6 +554,7 @@ def test_runtime_overseer_empty_guidance_uses_local_fallback_notice(monkeypatch)
     assert (
         "Re-check task requirement: product footwear." in state.pending_executor_notice
     )
+    assert action.h1_outcome in (None, "approve_with_nudge")
 
 
 def test_final_verifier_parser_accepts_valid_p3_json():

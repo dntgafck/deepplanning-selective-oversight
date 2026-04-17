@@ -1,0 +1,9 @@
+defaults:
+  - /system: C2
+  - _self_
+
+name: shopping-c2-always-block-ablation
+domains: [shopping]
+
+system:
+  block_on_mutation_mode: always

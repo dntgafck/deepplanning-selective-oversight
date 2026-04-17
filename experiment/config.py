@@ -16,7 +16,7 @@ class SystemConfig:
     overseer_thinking: bool | None = None
     max_steps: int = 400
     num_runs: int = 1
-    overseer_prompt_version: str = "c2-lite-v1.2"
+    overseer_prompt_version: str = "c2-lite-v1.3"
     loop_similarity_threshold: float = 0.92
     loop_window: int = 5
     loop_repeat_count: int = 3
@@ -30,6 +30,11 @@ class SystemConfig:
         "add_coupon_to_cart",
         "delete_coupon_from_cart",
     )
+    irreversible_tools: tuple[str, ...] = ()
+    block_on_mutation_mode: str = "auto"
+    max_hard_blocks_per_args: int = 2
+    require_cited_violation_for_block: bool = True
+    overseer_call_budget_per_task: int = 8
 
 
 def build_system_config(
@@ -62,7 +67,7 @@ def build_system_config(
         max_steps=max_steps,
         num_runs=num_runs,
         overseer_prompt_version=str(
-            defaults.get("overseer_prompt_version", "c2-lite-v1.2")
+            defaults.get("overseer_prompt_version", "c2-lite-v1.3")
         ),
         loop_similarity_threshold=float(
             defaults.get("loop_similarity_threshold", 0.92)
@@ -84,5 +89,16 @@ def build_system_config(
                     "delete_coupon_from_cart",
                 ),
             )
+        ),
+        irreversible_tools=tuple(
+            str(tool_name) for tool_name in defaults.get("irreversible_tools", ())
+        ),
+        block_on_mutation_mode=str(defaults.get("block_on_mutation_mode", "auto")),
+        max_hard_blocks_per_args=int(defaults.get("max_hard_blocks_per_args", 2)),
+        require_cited_violation_for_block=bool(
+            defaults.get("require_cited_violation_for_block", True)
+        ),
+        overseer_call_budget_per_task=int(
+            defaults.get("overseer_call_budget_per_task", 8)
         ),
     )

@@ -1,33 +1,27 @@
 # C2-lite Selective Oversight Design Memo
 
-**Project:** `deepplanning-selective-oversight` **Domain priority:** Shopping
-Planning first **Status:** Integrated architecture memo for the next
-implementation-planning chat **Target system:** C2-lite v1.2
+**Project:** `deepplanning-selective-oversight`  
+**Domain priority:** Shopping Planning first  
+**Status:** Integrated architecture memo, patched after 2026-04-17 smoke tests  
+**Target system:** C2-lite v1.3  
+**Changelog (v1.3):** Block-averse mutating policy. Pre-execution blocks of reversible mutations are now gated on cited violation + non-reversibility + per-args block cap. Run-terminating repeat limit removed and replaced by forced-approve escalation. See patch document `c2_lite_design_memo_patch_v1.3.md` §1 for motivation.
 
 ---
 
 ## 0. Purpose of this document
 
-This memo consolidates the design discussion into one implementation-facing
-markdown document.
+This memo consolidates the design discussion into one implementation-facing markdown document.
 
-It is written for the _next_ chat that will produce the handoff-grade
-implementation plan. Its job is to eliminate ambiguity early, preserve the key
-methodological constraints from the thesis, and make one concrete architectural
-choice.
+It is written for the *next* chat that will produce the handoff-grade implementation plan. Its job is to eliminate ambiguity early, preserve the key methodological constraints from the thesis, and make one concrete architectural choice.
 
-This is **not** a production spec and **not** code. It is the pre-spec design
-memo.
+This is **not** a production spec and **not** code. It is the pre-spec design memo.
 
 The memo intentionally does four things at once:
 
 1. grounds the design in the **actual repo** rather than generic agent patterns,
-2. keeps the architecture aligned with the **active thesis documents** rather
-   than archived drafts,
-3. reframes the overseer prompts as a **generic scaffold instantiated from the
-   executor’s task contract**, and
-4. ends with a **single recommended C2-lite design** that is realistic to
-   implement and defend in a short master’s thesis.
+2. keeps the architecture aligned with the **active thesis documents** rather than archived drafts,
+3. reframes the overseer prompts as a **generic scaffold instantiated from the executor’s task contract**, and
+4. ends with a **single recommended C2-lite design** that is realistic to implement and defend in a short master’s thesis.
 
 ---
 
@@ -41,13 +35,11 @@ These are the active documents that should govern design choices:
 - `experimental_protocol_v2.md`
 - `cross_reference_synthesis.md`
 
-Archived v1/v2 files are historical only and should not drive new design
-decisions.
+Archived v1/v2 files are historical only and should not drive new design decisions.
 
 ### 1.2 Repo files that matter most
 
-These are the most relevant current code paths for Shopping oversight
-integration:
+These are the most relevant current code paths for Shopping oversight integration:
 
 - `agent/shopping.py`
 - `oversight/__init__.py`
@@ -61,10 +53,8 @@ integration:
 
 These should be treated as authoritative for benchmark semantics:
 
-- upstream Shopping executor prompt file:
-  `benchmark/deepplanning/shoppingplanning/agent/prompts.py`
-- upstream Shopping tool schema:
-  `benchmark/deepplanning/shoppingplanning/tools/shopping_tool_schema.json`
+- upstream Shopping executor prompt file: `benchmark/deepplanning/shoppingplanning/agent/prompts.py`
+- upstream Shopping tool schema: `benchmark/deepplanning/shoppingplanning/tools/shopping_tool_schema.json`
 
 ### 1.4 Why these anchors matter
 
@@ -75,14 +65,11 @@ The core design mistake to avoid is inventing an overseer that is either:
 
 The correct compromise is:
 
-- use the **executor system prompt + tool schema** as the authoritative task
-  contract source,
+- use the **executor system prompt + tool schema** as the authoritative task contract source,
 - compile them into a structured execution contract,
-- run a **generic overseer scaffold** over that contract plus compact runtime
-  state.
+- run a **generic overseer scaffold** over that contract plus compact runtime state.
 
-That keeps the architecture general **without** pretending the benchmark has no
-task policy.
+That keeps the architecture general **without** pretending the benchmark has no task policy.
 
 ---
 
@@ -90,15 +77,11 @@ task policy.
 
 ### 2.1 What the thesis is actually about
 
-The thesis is not trying to show that Qwen3.5-9B somehow becomes intrinsically
-“smart enough” on its own.
+The thesis is not trying to show that Qwen3.5-9B somehow becomes intrinsically “smart enough” on its own.
 
 The thesis question is architectural:
 
-> can a selective oversight architecture, using a small executor and a stronger
-> selectively triggered overseer, improve end-to-end planning reliability on
-> DeepPlanning Shopping while giving a better cost–performance tradeoff than
-> always-on oversight and at least some stronger monolithic baselines?
+> can a selective oversight architecture, using a small executor and a stronger selectively triggered overseer, improve end-to-end planning reliability on DeepPlanning Shopping while giving a better cost–performance tradeoff than always-on oversight and at least some stronger monolithic baselines?
 
 That means the design must optimize for:
 
@@ -107,7 +90,7 @@ That means the design must optimize for:
 - **clean ablations**, and
 - **methodological defensibility**.
 
-### 2.2 What the design is _not_ trying to do
+### 2.2 What the design is *not* trying to do
 
 This design is **not** trying to:
 
@@ -123,9 +106,7 @@ This is a **thesis-winning** design target, not a maximal systems-paper target.
 
 The practical question is:
 
-> what is the simplest selective oversight architecture that can be inserted
-> into the current Shopping wrapper loop, preserve executor benchmark
-> faithfulness, and still plausibly improve reliability enough to matter?
+> what is the simplest selective oversight architecture that can be inserted into the current Shopping wrapper loop, preserve executor benchmark faithfulness, and still plausibly improve reliability enough to matter?
 
 ---
 
@@ -139,13 +120,10 @@ These should be treated as fixed:
 - Overseer must be **DeepSeek-V3.2**.
   - thinking mode for B, C1, C2
   - non-thinking mode for C2-nt
-- Benchmark task loading, sandbox/tool execution, output extraction, and
-  evaluation remain unchanged.
-- Only wrapper loop, oversight layer, logging, and minimal config/plumbing may
-  change.
+- Benchmark task loading, sandbox/tool execution, output extraction, and evaluation remain unchanged.
+- Only wrapper loop, oversight layer, logging, and minimal config/plumbing may change.
 - Do **not** change the executor’s benchmark-faithful live conversation history.
-- Do **not** introduce executor-side pruning, summarization, compaction, or
-  history rewriting.
+- Do **not** introduce executor-side pruning, summarization, compaction, or history rewriting.
 - Do **not** add training-heavy components.
 - Keep the design ablatable into:
   - `C2-final`
@@ -169,17 +147,14 @@ These are the real design variables:
 
 ### 3.3 Non-obvious methodological consequence
 
-Because the executor’s benchmark-faithful history cannot be rewritten, the old
-idea of “append correction into history” is weaker than it first sounds.
+Because the executor’s benchmark-faithful history cannot be rewritten, the old idea of “append correction into history” is weaker than it first sounds.
 
 For v1, the clean interpretation is:
 
 - persisted benchmark history stays unchanged,
-- oversight influence is injected only through **transient request-side
-  notices**,
+- oversight influence is injected only through **transient request-side notices**,
 - those notices are logged for auditability,
-- but they do **not** become part of the stored benchmark conversation
-  trajectory.
+- but they do **not** become part of the stored benchmark conversation trajectory.
 
 That is a crucial design decision.
 
@@ -202,63 +177,43 @@ The two-phase structure matters:
 - phase 1: initial search / build trajectory
 - phase 2: cart-check / finalize trajectory
 
-This is not an abstract “single long loop.” It already has a structural
-midpoint.
+This is not an abstract “single long loop.” It already has a structural midpoint.
 
 ### 4.2 Key repo facts that shape the design
 
 #### Fact A — the executor system prompt is loaded by the wrapper
 
-`agent/shopping.py` exposes `get_system_prompt(level)` and returns
-`load_shopping_prompt(level)`. That means the benchmark’s own Shopping prompt is
-already a clean authoritative source for the task contract. The wrapper is not
-inventing task rules; it is importing them from the vendored benchmark.
+`agent/shopping.py` exposes `get_system_prompt(level)` and returns `load_shopping_prompt(level)`. That means the benchmark’s own Shopping prompt is already a clean authoritative source for the task contract. The wrapper is not inventing task rules; it is importing them from the vendored benchmark.  
 
 #### Fact B — the Shopping wrapper is already two-phase
 
-The current loop runs an `initial` phase, then injects the cart-check transition
-via `self._add_to_cart(messages)`, then runs a `cart_check` phase with
-`stop_on_no_calls=True`. This provides a natural repo-grounded midpoint and a
-natural pre-finalization checkpoint.
+The current loop runs an `initial` phase, then injects the cart-check transition via `self._add_to_cart(messages)`, then runs a `cart_check` phase with `stop_on_no_calls=True`. This provides a natural repo-grounded midpoint and a natural pre-finalization checkpoint.  
 
 #### Fact C — `request_messages` is cloned from `messages`
 
-Inside `_run_phase`, the wrapper constructs `request_messages = list(messages)`
-before each executor call. That is the cleanest place to inject transient
-oversight notices without rewriting the persisted benchmark history.
+Inside `_run_phase`, the wrapper constructs `request_messages = list(messages)` before each executor call. That is the cleanest place to inject transient oversight notices without rewriting the persisted benchmark history.  
 
 #### Fact D — oversight exists architecturally but is currently a stub
 
-`oversight/__init__.py` defines `OversightAction`, but `evaluate_oversight(...)`
-currently returns `OversightAction(should_intervene=False)`, and
-`apply_intervention(...)` returns the original response unchanged. So the
-architecture has an insertion point, but not real behavior yet.
+`oversight/__init__.py` defines `OversightAction`, but `evaluate_oversight(...)` currently returns `OversightAction(should_intervene=False)`, and `apply_intervention(...)` returns the original response unchanged. So the architecture has an insertion point, but not real behavior yet.
 
 #### Fact E — the current oversight call site is only pre-tool
 
-The existing Shopping loop calls oversight only when the executor produced tool
-calls and before those calls are executed. There is no real post-tool error hook
-and no mandatory final-verification hook on the `cart_check` no-tool-call exit.
+The existing Shopping loop calls oversight only when the executor produced tool calls and before those calls are executed. There is no real post-tool error hook and no mandatory final-verification hook on the `cart_check` no-tool-call exit.
 
 #### Fact F — current runtime state is useful but insufficient
 
-`oversight/state.py` already tracks executor tokens, overseer tokens, trigger
-history, and tool-call history. But `record_tool_call(...)` currently stores
-only:
+`oversight/state.py` already tracks executor tokens, overseer tokens, trigger history, and tool-call history. But `record_tool_call(...)` currently stores only:
 
 - `tool_name`
 - `args_hash`
 - `result_summary`
 
-That is enough for exact-repeat logic, but not enough for “highly similar args”
-loop detection unless the state is extended to store normalized raw arguments
-too.
+That is enough for exact-repeat logic, but not enough for “highly similar args” loop detection unless the state is extended to store normalized raw arguments too.
 
 #### Fact G — structured logging is already good enough
 
-`experiment/logging.py` uses `StructuredLogger`, initializes
-`agent_events.jsonl` and `task_results.jsonl`, and `log_turn(...)` already
-records:
+`experiment/logging.py` uses `StructuredLogger`, initializes `agent_events.jsonl` and `task_results.jsonl`, and `log_turn(...)` already records:
 
 - `request_messages`
 - raw response
@@ -267,43 +222,35 @@ records:
 - token counts
 - stop reason
 
-So C2-lite does not need a new logging subsystem; it needs additional event
-types and fields.
+So C2-lite does not need a new logging subsystem; it needs additional event types and fields.
 
 #### Fact H — there is still stale executor fallback residue
 
-`deepplanning/orchestration.py` still falls back to `qwen3-14b` in
-`_executor_models(...)`. That conflicts with the active thesis source of truth,
-which now fixes the executor to Qwen3.5-9B. This should be removed or forced
-explicit.
+`deepplanning/orchestration.py` still falls back to `qwen3-14b` in `_executor_models(...)`. That conflicts with the active thesis source of truth, which now fixes the executor to Qwen3.5-9B. This should be removed or forced explicit.
 
 ### 4.3 Current hook points and missing hook points
 
 #### Already available
 
-- **Pre-tool hook:** after executor output is parsed into tool calls, before
-  tools execute.
+- **Pre-tool hook:** after executor output is parsed into tool calls, before tools execute.
 
 #### Missing and needed
 
 - **Post-tool hook:** after tool results are available.
 - **Phase-boundary hook:** after `initial`, before `cart_check`.
-- **Final no-tool-call hook:** just before `cart_check` returns with no more
-  tool calls.
+- **Final no-tool-call hook:** just before `cart_check` returns with no more tool calls.
 
 These three additions are enough to support the full C2-lite trigger set.
 
 ### 4.4 Repo-aware midpoint choice
 
-Because the Shopping wrapper is already two-phase, the best midpoint definition
-is **not** “50% of turns.”
+Because the Shopping wrapper is already two-phase, the best midpoint definition is **not** “50% of turns.”
 
 The right midpoint for Shopping v1 is:
 
 > the boundary between the `initial` phase and the `cart_check` phase.
 
-That is deterministic, easy to explain, and aligned with the repo’s actual
-control flow.
+That is deterministic, easy to explain, and aligned with the repo’s actual control flow.
 
 ---
 
@@ -313,17 +260,13 @@ control flow.
 
 A Shopping-specialized overseer prompt is too benchmark-fitted.
 
-It risks turning the overseer into a second planner whose competence comes
-partly from hand-tuned benchmark knowledge rather than from a reusable
-selective-oversight mechanism.
+It risks turning the overseer into a second planner whose competence comes partly from hand-tuned benchmark knowledge rather than from a reusable selective-oversight mechanism.
 
 That is weaker methodologically.
 
 ### 5.2 What is also wrong with “fully generic, no task contract” oversight
 
-A totally domain-free overseer that sees only the user query and recent steps
-throws away important normative information that the executor was explicitly
-given.
+A totally domain-free overseer that sees only the user query and recent steps throws away important normative information that the executor was explicitly given.
 
 In Shopping, the user query alone does **not** tell the overseer that:
 
@@ -338,8 +281,7 @@ Those rules live in the executor system prompt and the tool schema.
 
 The correct abstraction is:
 
-> **generic overseer scaffold** + **compiled execution contract** + **task
-> checklist** + **compact trajectory state**
+> **generic overseer scaffold** + **compiled execution contract** + **task checklist** + **compact trajectory state**
 
 So the overseer prompt itself should be generic:
 
@@ -348,8 +290,7 @@ So the overseer prompt itself should be generic:
 - and intervenes,
 - but it does not define domain policy.
 
-Domain policy comes from a compiled artifact derived from the executor’s own
-prompt and tool schema.
+Domain policy comes from a compiled artifact derived from the executor’s own prompt and tool schema.
 
 ### 5.4 Thesis claim this supports
 
@@ -357,9 +298,7 @@ The thesis should not claim a completely domain-free overseer.
 
 The stronger and more honest claim is:
 
-> a generic selective-oversight architecture can be instantiated from the
-> executor’s own task contract, rather than from benchmark-handcrafted overseer
-> prompts.
+> a generic selective-oversight architecture can be instantiated from the executor’s own task contract, rather than from benchmark-handcrafted overseer prompts.
 
 That is a better thesis claim.
 
@@ -381,8 +320,7 @@ This section preserves the design-space exploration before convergence.
 #### Trigger behavior
 
 - tool/error occurrence: post-tool only on explicit failure payloads
-- loop detection: exact same tool + exact args hash repeated 3 times in 5
-  executed calls
+- loop detection: exact same tool + exact args hash repeated 3 times in 5 executed calls
 - mutating action: pre-exec on Shopping mutators
 - coverage deficit: one-shot at phase boundary using coarse checklist
 - final verification: always at final no-tool-call checkpoint
@@ -416,10 +354,8 @@ Safe, but too conservative if C2 is supposed to visibly outperform A.
 
 #### Trigger behavior
 
-- tool/error occurrence: post-tool on explicit failures or malformed
-  observations
-- loop detection: pre-exec if current proposed tool call is highly similar to
-  two of last five executed calls of same tool
+- tool/error occurrence: post-tool on explicit failures or malformed observations
+- loop detection: pre-exec if current proposed tool call is highly similar to two of last five executed calls of same tool
 - mutating action: pre-exec on Shopping mutators
 - coverage deficit: one-shot at the real Shopping midpoint
 - final verification: mandatory at final no-tool-call checkpoint
@@ -468,18 +404,18 @@ Potentially better later, but not the right first C2-lite.
 
 ## 7. Decision matrix
 
-| Criterion                       | Candidate A                                 | Candidate B  | Candidate C            |
-| ------------------------------- | ------------------------------------------- | ------------ | ---------------------- |
-| Integration risk                | Low                                         | Low–Medium   | Medium                 |
-| Implementation effort           | Low                                         | Medium       | Medium–High            |
-| Expected accuracy gain          | Low–Medium                                  | Medium–High  | High                   |
-| Expected cost overhead          | Low                                         | Medium       | Medium–High            |
-| Trigger precision               | High on mutate/final, weak on loop/coverage | Good overall | Good, but may overfire |
-| Correction usefulness           | Moderate                                    | High         | High                   |
-| Ease of ablation                | Good                                        | Excellent    | Good                   |
-| Ease of methodology explanation | Excellent                                   | Excellent    | Fair                   |
-| Robustness to weak overseer     | High                                        | Good         | Lower                  |
-| Fit with current repo           | Very high                                   | Very high    | Moderate               |
+| Criterion | Candidate A | Candidate B | Candidate C |
+|---|---|---|---|
+| Integration risk | Low | Low–Medium | Medium |
+| Implementation effort | Low | Medium | Medium–High |
+| Expected accuracy gain | Low–Medium | Medium–High | High |
+| Expected cost overhead | Low | Medium | Medium–High |
+| Trigger precision | High on mutate/final, weak on loop/coverage | Good overall | Good, but may overfire |
+| Correction usefulness | Moderate | High | High |
+| Ease of ablation | Good | Excellent | Good |
+| Ease of methodology explanation | Excellent | Excellent | Fair |
+| Robustness to weak overseer | High | Good | Lower |
+| Fit with current repo | Very high | Very high | Moderate |
 
 ### Decision
 
@@ -500,26 +436,25 @@ It is the best balance of:
 
 The final recommended architecture is:
 
-> **LLM-free trigger filter** → **generic overseer prompt scaffold** →
-> **task-specific runtime reasoning via compiled contract + checklist + compact
-> state**
+> **LLM-free trigger filter** → **generic overseer prompt scaffold** → **task-specific runtime reasoning via compiled contract + checklist + compact state**
 
 ### 8.2 Main conceptual components
 
 There are four core artifacts:
 
-1. **ExecutionContract** compiled from executor system prompt + tool schema
+1. **ExecutionContract**  
+   compiled from executor system prompt + tool schema
 
-2. **TaskChecklist** compiled from task query under the execution contract
+2. **TaskChecklist**  
+   compiled from task query under the execution contract
 
-3. **CompactOverseerState** trigger-local runtime slice derived from trajectory
-   and current proposal/state
+3. **CompactOverseerState**  
+   trigger-local runtime slice derived from trajectory and current proposal/state
 
-4. **TransientNotice** deterministic renderer that converts overseer JSON into a
-   one-turn request-side intervention
+4. **TransientNotice**  
+   deterministic renderer that converts overseer JSON into a one-turn request-side intervention
 
-These are the key abstractions the next implementation-planning chat should
-treat as first-class.
+These are the key abstractions the next implementation-planning chat should treat as first-class.
 
 ---
 
@@ -545,9 +480,7 @@ Represent the executor’s task policy in a compact, explicit, reusable structur
 
 ### Why this exists
 
-The executor system prompt defines normative task policy, but it is written for
-execution, not for monitoring. The overseer needs a normalized representation of
-that policy.
+The executor system prompt defines normative task policy, but it is written for execution, not for monitoring. The overseer needs a normalized representation of that policy.
 
 ### Recommended schema
 
@@ -600,8 +533,7 @@ that policy.
 
 ### Important rule
 
-`tool_semantics` must be derived from the tool schema / repo mapping logic, not
-from the prompt text alone.
+`tool_semantics` must be derived from the tool schema / repo mapping logic, not from the prompt text alone.
 
 ---
 
@@ -609,8 +541,7 @@ from the prompt text alone.
 
 ### Purpose
 
-Represent the instance-specific requirements extracted from the user query under
-the task contract.
+Represent the instance-specific requirements extracted from the user query under the task contract.
 
 ### Inputs
 
@@ -624,8 +555,7 @@ the task contract.
 
 ### Why this exists
 
-The overseer should not recompute task constraints from scratch at every
-trigger. That is wasteful and inconsistent across runs.
+The overseer should not recompute task constraints from scratch at every trigger. That is wasteful and inconsistent across runs.
 
 ### Recommended schema
 
@@ -647,10 +577,12 @@ trigger. That is wasteful and inconsistent across runs.
     }
   ],
   "explicit_constraints": [
-    { "key": "budget_max", "value": 300 },
-    { "key": "shipping_deadline_days", "value": 3 }
+    {"key": "budget_max", "value": 300},
+    {"key": "shipping_deadline_days", "value": 3}
   ],
-  "coupon_constraints": [{ "key": "coupon_use_required", "value": false }],
+  "coupon_constraints": [
+    {"key": "coupon_use_required", "value": false}
+  ],
   "coverage_targets": [
     "item:running shoes",
     "brand:nike",
@@ -676,8 +608,7 @@ That separation matters methodologically.
 
 ### Purpose
 
-Provide only the minimal runtime information necessary for a trigger-specific
-decision.
+Provide only the minimal runtime information necessary for a trigger-specific decision.
 
 ### Recommended schema
 
@@ -711,8 +642,7 @@ decision.
 
 ### Principle
 
-This state should stay trigger-local and compact. Do not ship full trajectory
-history to the overseer in v1 unless debugging.
+This state should stay trigger-local and compact. Do not ship full trajectory history to the overseer in v1 unless debugging.
 
 ---
 
@@ -720,8 +650,7 @@ history to the overseer in v1 unless debugging.
 
 ### Purpose
 
-Convert overseer outputs into a deterministic, narrow intervention that
-influences the next executor turn without rewriting stored benchmark history.
+Convert overseer outputs into a deterministic, narrow intervention that influences the next executor turn without rewriting stored benchmark history.
 
 ### Format
 
@@ -739,25 +668,21 @@ Do not mention this notice in the final answer.
 
 ### Important rule
 
-The notice is injected into `request_messages` only, not persisted into
-`messages`.
+The notice is injected into `request_messages` only, not persisted into `messages`.
 
 ---
 
 ## 10. Prompt inventory
 
-The recommended prompt inventory has **four prompt families**, but only **two
-runtime overseer prompts**.
+The recommended prompt inventory has **four prompt families**, but only **two runtime overseer prompts**.
 
 ### P0 — Domain contract compiler
 
-**Purpose:** compile executor system prompt + tool schema into
-`ExecutionContract`.
+**Purpose:** compile executor system prompt + tool schema into `ExecutionContract`.
 
 **When it runs:** offline or pre-run cache generation.
 
-**Why it exists:** convert the executor’s policy prompt into a monitorable
-contract.
+**Why it exists:** convert the executor’s policy prompt into a monitorable contract.
 
 ---
 
@@ -767,8 +692,7 @@ contract.
 
 **When it runs:** once per task.
 
-**Why it exists:** make runtime coverage and final verification cheaper, more
-stable, and more auditable.
+**Why it exists:** make runtime coverage and final verification cheaper, more stable, and more auditable.
 
 ---
 
@@ -795,8 +719,7 @@ stable, and more auditable.
 
 **Purpose:** mandatory final checkpoint before commit/finalize.
 
-**When it runs:** only at final no-tool-call checkpoint, after deterministic
-stale-state precheck passes.
+**When it runs:** only at final no-tool-call checkpoint, after deterministic stale-state precheck passes.
 
 **Allowed actions:**
 
@@ -887,11 +810,19 @@ Your job is to evaluate the current executor step against:
 2. the task checklist,
 3. the trigger-local trajectory state.
 
-You are not the primary planner.
-Do not solve the full task from scratch.
-Prefer approve when evidence is insufficient.
-Use only the allowed actions.
-Keep any corrective guidance short, specific, and action-oriented.
+You are not the primary planner. Do not solve the full task from scratch.
+
+Your output has two purposes:
+- diagnose whether the proposed action violates the contract or checklist, and
+- suggest short corrective guidance if it does.
+
+You do not decide whether the action is blocked or allowed. The runtime makes
+that decision based on objective fields in your output (see schema).
+
+Return approve for ambiguous or insufficient-evidence cases. Do not assert a
+violation unless you can name the specific contract rule ID or unmet checklist
+key that the proposed action contradicts.
+
 Output valid JSON only.
 ```
 
@@ -910,7 +841,8 @@ Output valid JSON only.
   "current_proposed_tool_calls": [...],
   "latest_observation": "...",
   "authoritative_state_snapshot": {...},
-  "freshness": {...}
+  "freshness": {...},
+  "tool_reversibility": "reversible|irreversible|unknown"
 }
 ```
 
@@ -918,43 +850,65 @@ Output valid JSON only.
 
 ```json
 {
-  "action": "approve|provide_guidance|correct_observation",
-  "decision_summary": "string",
-  "block_current_tool": true,
+  "action": "approve | provide_guidance | correct_observation",
+  "decision_summary": "string, one sentence",
+  "violation_evidence": {
+    "violated_contract_ids": ["string"],
+    "unmet_checklist_keys": ["string"],
+    "confidence": "low | medium | high"
+  },
   "guidance_lines": ["string"],
-  "corrected_observation": "string|null",
-  "violated_contract_ids": ["string"],
-  "unmet_checklist_keys": ["string"]
+  "corrected_observation": "string | null"
 }
 ```
+
+**Removed fields.** `block_current_tool` is removed from the overseer's
+output. Blocking is now a runtime decision derived from `action`,
+`violation_evidence`, and `tool_reversibility` per the rules in §15.2.
+
+### Field constraints
+
+- `action = approve` ⇒ `violation_evidence.violated_contract_ids` and
+  `unmet_checklist_keys` MUST both be empty arrays.
+- `action = provide_guidance` with `violated_contract_ids = []` and
+  `unmet_checklist_keys = []` is permitted (a soft nudge with no cited
+  violation).
+- `action = provide_guidance` with `confidence = "low"` is permitted but
+  never causes a hard block — the runtime will treat it as approve-with-nudge
+  (see §15.2).
+- `corrected_observation` is non-null only when `action = correct_observation`
+  and `trigger_type = error_occurrence`.
 
 ### Trigger-specific policy notes
 
 #### Mutating action
 
-- allowed actions: `approve`, `provide_guidance`
-- default bias: approve unless mutation appears premature, unsafe, or
-  unsupported
-- preferred guidance style: tell the executor what to verify before mutating
+- Allowed actions: `approve`, `provide_guidance`.
+- Default bias: `approve`. Return `provide_guidance` only if the mutation
+  contradicts a cited contract rule ID or a concrete unmet checklist key.
+- Do **not** return `provide_guidance` merely because more verification
+  *could* have been done. "Insufficient evidence of correctness" is never
+  grounds for intervention on a reversible mutation.
+- Preferred guidance style: state the specific contract rule or checklist
+  key that was violated, then describe the minimal corrective action.
 
 #### Loop detection
 
-- allowed actions: `provide_guidance`
-- if rule fired, do not silently approve
-- guidance should redirect the search dimension, not just say “try again”
+- Allowed actions: `provide_guidance`.
+- If rule fired, do not silently approve.
+- Guidance should redirect the search dimension, not just say "try again".
 
 #### Error occurrence
 
-- allowed actions: `provide_guidance`, `correct_observation`
-- use `correct_observation` only when the provided evidence supports a direct
-  correction
+- Allowed actions: `provide_guidance`, `correct_observation`.
+- Use `correct_observation` only when the provided evidence supports a
+  direct correction.
 
 #### Coverage deficit
 
-- allowed actions: `provide_guidance`
-- guidance should mention missing coverage targets only
-- cap guidance to 3 lines
-
+- Allowed actions: `provide_guidance`.
+- Guidance should mention missing coverage targets only.
+- Cap guidance to 3 lines.
 ---
 
 ## 11.4 P3 — Generic final verifier
@@ -1046,8 +1000,7 @@ The best ordering is **by hook site**, not as one flat list.
 
 ### Precedence rule inside H1
 
-If a proposed action is both mutating and repetitive, treat it primarily as
-**mutating**. State-changing risk is more important than loop labeling.
+If a proposed action is both mutating and repetitive, treat it primarily as **mutating**. State-changing risk is more important than loop labeling.
 
 ---
 
@@ -1086,10 +1039,8 @@ The current proposed tool call is considered highly similar to a past call if:
 Trigger `loop_detection` when:
 
 - the current proposed tool call matches the same tool,
-- and is highly similar to at least **two** of the last **five** executed tool
-  calls,
-- so the current proposal would create the **third** similar call in that 5-call
-  window.
+- and is highly similar to at least **two** of the last **five** executed tool calls,
+- so the current proposal would create the **third** similar call in that 5-call window.
 
 ### Numeric defaults
 
@@ -1118,31 +1069,51 @@ Reason:
 
 ## 12.6 Exact mutating-tool set for Shopping
 
-Use the real tool schema names:
+Use the real tool schema names, with reversibility classification:
 
-- `add_product_to_cart`
-- `delete_product_from_cart`
-- `add_coupon_to_cart`
-- `delete_coupon_from_cart`
+| Tool | Mutator | Reversibility | Inverse |
+|---|---|---|---|
+| `add_product_to_cart` | yes | **reversible** | `delete_product_from_cart` |
+| `delete_product_from_cart` | yes | **reversible** | `add_product_to_cart` |
+| `add_coupon_to_cart` | yes | **reversible** | `delete_coupon_from_cart` |
+| `delete_coupon_from_cart` | yes | **reversible** | `add_coupon_to_cart` |
+
+All four Shopping mutators are **reversible**. No tool in the Shopping
+schema produces irreversible state change (no `confirm_purchase` /
+`checkout` exists in the benchmark).
 
 Treat `get_cart_info` as read-only but **verification-critical**.
 
+### Config representation
+
+The config stores mutating tools as a mapping rather than a flat list, so
+the reversibility tag is available at runtime:
+
+```yaml
+mutating_tools:
+  add_product_to_cart:    { reversibility: reversible }
+  delete_product_from_cart: { reversibility: reversible }
+  add_coupon_to_cart:     { reversibility: reversible }
+  delete_coupon_from_cart: { reversibility: reversible }
+```
+
+For backwards compatibility, accept the flat-list form too and default
+unspecified tools to `reversibility: unknown`, which is treated
+conservatively by the H1 gate (see §15.2).
+
 Do not rely on shorthand names from prose drafts such as `confirm_purchase`,
 which do not exist in the actual Shopping tool schema.
-
 ---
 
 ## 12.7 Coverage deficit definition
 
 ### Principle
 
-Coverage tracking should use only **search-relevant targets**, not every global
-optimization objective.
+Coverage tracking should use only **search-relevant targets**, not every global optimization objective.
 
 ### Why
 
-If coverage tries to track all final objective elements at midpoint, it becomes
-noisy and under-precise.
+If coverage tries to track all final objective elements at midpoint, it becomes noisy and under-precise.
 
 ### v1 rule
 
@@ -1160,18 +1131,14 @@ coverage_fraction < 0.50
 
 ### Covered means
 
-A coverage target counts as covered if the recent executed trajectory contains
-evidence that the executor has queried or inspected that target or an equivalent
-normalized variant.
+A coverage target counts as covered if the recent executed trajectory contains evidence that the executor has queried or inspected that target or an equivalent normalized variant.
 
 ### Examples
 
 - `item:running shoes` covered by search/query over running shoes
-- `brand:nike` covered by brand filter or product detail inspection involving
-  Nike
+- `brand:nike` covered by brand filter or product detail inspection involving Nike
 - `coupon` covered by coupon-related search or cart coupon reasoning
-- `shipping` covered by transport-time calculation or explicit shipping
-  inspection
+- `shipping` covered by transport-time calculation or explicit shipping inspection
 
 ---
 
@@ -1205,8 +1172,7 @@ call `P3`.
 ### Final verifier outcomes
 
 - `approve` -> finalize now
-- `run_verification` -> do not finalize; inject repair notice; continue one more
-  executor turn
+- `run_verification` -> do not finalize; inject repair notice; continue one more executor turn
 
 ### Retry cap
 
@@ -1220,26 +1186,37 @@ This prevents endless endgame ping-pong.
 
 ## 13.1 Important implementation reinterpretation
 
-The current code shape suggests “apply intervention to response,” but for v1
-that is the wrong semantics.
+The current code shape suggests "apply intervention to response," but for v1 that is the wrong semantics.
 
 The correct runtime interpretation is:
 
-- **approve** -> continue normally
-- **provide_guidance** -> optionally block current tool execution, set
-  `pending_executor_notice`, then continue to next executor turn
-- **correct_observation** -> set `pending_executor_notice` containing
-  authoritative correction, then continue
-- **run_verification** -> final verifier blocked commit; inject repair notice
-  and continue
+- **approve** → continue normally; no notice injected
+- **provide_guidance** → inject notice into the next `request_messages`; **tool
+  executes as proposed by default**; tool is blocked only if the H1 gate
+  conditions in §15.2 are met
+- **correct_observation** → set `pending_executor_notice` containing authoritative correction, then continue
+- **run_verification** (final verifier only) → final verifier blocked commit; inject repair notice and continue
 
-### Crucial rule
+### Crucial rule 1 — no history rewriting
 
-Do **not** rewrite persisted `messages` history and do **not** overwrite
-previously returned tool observations in-place.
+Do **not** rewrite persisted `messages` history and do **not** overwrite previously returned tool observations in-place.
 
 That would violate the benchmark-faithfulness constraint.
 
+### Crucial rule 2 — blocking is opt-in, not default
+
+`provide_guidance` by itself does **not** imply the proposed tool is blocked.
+The H1 gate (§15.2) decides whether to block based on:
+
+- the tool's reversibility tag,
+- whether the overseer cited a concrete contract or checklist violation,
+- the overseer's stated confidence,
+- and how many times the same `(tool_name, args_hash)` has already been
+  blocked on this task.
+
+If the gate does not trigger a block, the tool executes and the notice is
+injected for the *next* executor turn. This preserves forward progress on
+reversible tools while still giving the overseer a corrective voice.
 ---
 
 ## 13.2 Deterministic notice renderer
@@ -1272,25 +1249,83 @@ Do not mention this notice in the final answer.
 
 ## 13.3 Mutating-action intervention policy
 
-### Pre-execution
+### Design principle
 
-When the current proposed action is a mutator:
+A reversible mutation should almost never be blocked pre-execution. The executor
+can undo a wrong reversible mutation with its inverse tool. Blocking is a
+*stronger* intervention than the thesis's benchmark-faithfulness constraint
+comfortably permits, because it prevents the benchmark's own error-and-recovery
+dynamics. Hard-block is reserved for the narrow case where the mutation would
+(a) violate a cited contract rule with high confidence, and (b) the runtime
+can show forward progress is still possible after the block.
 
-- default: `approve`
-- if risky / premature / inconsistent with current contract or checklist state:
-  `provide_guidance`
-- if `provide_guidance`, block current mutation and request a corrective next
-  step
+### Pre-execution outcomes (three distinct cases)
+
+For each mutating tool call, the H1 gate produces exactly one of:
+
+- **APPROVE_AND_CONTINUE** — tool executes; no notice injected.
+- **APPROVE_WITH_NUDGE** — tool executes; `pending_executor_notice` is set
+  for the next executor turn.
+- **HARD_BLOCK** — tool does *not* execute; `pending_executor_notice` is set
+  for the next executor turn; `blocked_mutation_count[(tool,args_hash)]` is
+  incremented.
+
+### Block predicate
+
+`HARD_BLOCK` is produced **iff all of the following hold**:
+
+1. The overseer returned `action = provide_guidance`.
+2. `violation_evidence.violated_contract_ids ≠ []` **or**
+   `violation_evidence.unmet_checklist_keys ≠ []`.
+3. `violation_evidence.confidence ∈ {medium, high}`.
+4. The tool's `reversibility` is `irreversible` **or** `unknown`.
+5. The same `(tool_name, args_hash)` has been hard-blocked fewer than
+   `max_hard_blocks_per_args` times in this task.
+
+If any of 1–5 fails, the outcome is `APPROVE_WITH_NUDGE` (when `action =
+provide_guidance`) or `APPROVE_AND_CONTINUE` (when `action = approve`).
+
+For Shopping v1 all mutators are reversible, so condition 4 fails by
+default and the H1 gate reduces to: **any `provide_guidance` on a Shopping
+mutation yields `APPROVE_WITH_NUDGE`**. This is the right behavior for the
+thesis — the overseer still gets to inject corrections, but cannot deadlock
+the run on reversible cart operations.
+
+### Forced-approve escalation
+
+If `blocked_mutation_count[(tool,args_hash)] ≥ max_hard_blocks_per_args`,
+the next attempt of the same `(tool,args_hash)` is escalated to
+`APPROVE_AND_CONTINUE` regardless of what the overseer says, and the event
+is logged with `intervention_type = "overseer_override_forced"`. This
+guarantees forward progress: the overseer can push back twice on the same
+exact call, but the third time the executor is trusted.
+
+This rule replaces the v1.2 run-killing `oversight_blocked_repeat_limit`
+termination, which the smoke tests showed destroys task completion without
+preventing any real harm.
+
+### Guidance style
+
+When the overseer returns `provide_guidance`, guidance should:
+
+- cite the contract rule ID or checklist key that was violated (required if
+  `confidence ≠ low`),
+- describe the minimal corrective action,
+- be at most 3 lines.
 
 ### Guidance examples
 
-- verify cart state first
-- inspect coupon applicability first
-- verify missing required attribute first
-- compare lowest-cost alternative first
+- "Product 903e0448 violates checklist key `item:nike_orange_footwear` —
+  this item is apparel, not footwear. Consider filtering by `category=shoes`
+  before adding."
+- "The `delete_product_from_cart` call targets a product not currently in
+  the cart (per `authoritative_state_snapshot`). Refresh cart state with
+  `get_cart_info` first."
 
-Avoid strong item-choice micromanagement in v1.
-
+Avoid strong item-choice micromanagement in v1. If the overseer's only
+complaint is "the executor has not proven this is the cheapest option", the
+overseer should return `action = approve`, because that is
+insufficient-evidence uncertainty, not a cited violation.
 ---
 
 ## 13.4 Error-occurrence intervention policy
@@ -1307,8 +1342,7 @@ When tool output indicates error, invalid state, or malformed observation:
 Use `correct_observation` for:
 
 - executor appears to misread the tool output
-- tool explicitly returned an error and the correction is just to recognize that
-  fact
+- tool explicitly returned an error and the correction is just to recognize that fact
 
 Use `provide_guidance` for:
 
@@ -1338,8 +1372,7 @@ Bad:
 
 ## 13.6 Final-verification intervention policy
 
-When final verifier returns `run_verification`, the next-step notice should
-state:
+When final verifier returns `run_verification`, the next-step notice should state:
 
 - specific blockers,
 - specific required next actions,
@@ -1363,8 +1396,7 @@ Do not mention this notice in the final answer.
 
 ## 14. Shopping v1 instantiation details
 
-This section explains how the generic scaffold is instantiated for the first
-real domain.
+This section explains how the generic scaffold is instantiated for the first real domain.
 
 ## 14.1 Contract compiler expectations for Shopping
 
@@ -1380,10 +1412,8 @@ The Shopping `ExecutionContract` should capture, at minimum:
 ### Expected level differences
 
 - **Level 1:** primary objective is absolute lowest final price
-- **Level 2:** meeting budget is primary; minimizing price is secondary within
-  budget
-- **Level 3:** products **plus coupons** determine optimality; coupon
-  scope/threshold/stacking rules matter
+- **Level 2:** meeting budget is primary; minimizing price is secondary within budget
+- **Level 3:** products **plus coupons** determine optimality; coupon scope/threshold/stacking rules matter
 
 ## 14.2 Checklist compiler expectations for Shopping
 
@@ -1410,8 +1440,7 @@ It should **not** try to judge global optimality at midpoint.
 
 ## 14.3 Authoritative state snapshot for Shopping
 
-The authoritative state snapshot should be built primarily from the latest
-`get_cart_info` result.
+The authoritative state snapshot should be built primarily from the latest `get_cart_info` result.
 
 Suggested structure:
 
@@ -1473,19 +1502,47 @@ Recommended cache keys:
 ## 15.2 Hook H1 — pre-tool oversight
 
 Reuse the existing pre-tool oversight hook in `agent/shopping.py`, but change
-semantics.
+semantics. The hook no longer has a single "intervene or not" branch; it has
+a three-outcome gate.
 
 ### Required behavior
 
-- read `pending_executor_notice` and inject it into `request_messages`
-- evaluate mutating and loop triggers before executing proposed tools
-- if trigger returns blocking action, skip current tool execution and continue
-  next executor turn
+1. Read `pending_executor_notice` and inject it into `request_messages` (no
+   change to stored `messages`).
+2. Evaluate mutating and loop triggers on the current proposed tool calls.
+3. If a trigger fires, call P2 with the appropriate `trigger_type` and
+   `tool_reversibility` (looked up in the config's `mutating_tools` table).
+4. Compute the H1 outcome from P2's response per the block predicate in
+   §13.3:
+   - `APPROVE_AND_CONTINUE` → execute tool, no notice.
+   - `APPROVE_WITH_NUDGE` → execute tool, set `pending_executor_notice`.
+   - `HARD_BLOCK` → skip tool, set `pending_executor_notice`, increment
+     `blocked_mutation_count[(tool, args_hash)]`.
+5. If `blocked_mutation_count[(tool, args_hash)] ≥ max_hard_blocks_per_args`,
+   force `APPROVE_AND_CONTINUE` on the next attempt of the same
+   `(tool, args_hash)` and log `intervention_type = "overseer_override_forced"`.
+6. Regardless of outcome, log the full `OversightStep` event (§16.1) with
+   the H1 outcome recorded in a new field `h1_outcome` ∈
+   {`approve_continue`, `approve_with_nudge`, `hard_block`, `forced_approve`}.
 
 ### Important note
 
 Do not mutate stored `messages` for this.
 
+The `oversight_blocked_repeat_limit` run-termination path is **removed**.
+The forced-approve escalation replaces it.
+
+### Tool-reversibility lookup
+
+`tool_reversibility` is resolved at trigger time:
+
+```python
+tool_spec = config.system.mutating_tools.get(tool_name)
+reversibility = tool_spec.reversibility if tool_spec else "unknown"
+```
+
+Missing tool entries resolve to `unknown`, which the block predicate treats
+conservatively (blockable under condition 4).
 ---
 
 ## 15.3 Hook H2 — post-tool oversight
@@ -1510,8 +1567,7 @@ Add one-shot coverage evaluation at:
 
 ### Required behavior
 
-- compute coverage fraction from executed trajectory and
-  `TaskChecklist.coverage_targets`
+- compute coverage fraction from executed trajectory and `TaskChecklist.coverage_targets`
 - if deficit, call P2 with `coverage_deficit`
 - set `pending_executor_notice` for first turn of `cart_check`
 
@@ -1519,8 +1575,7 @@ Add one-shot coverage evaluation at:
 
 ## 15.5 Hook H4 — final no-tool-call verification checkpoint
 
-Add a new hook just before the current `return messages, "no_tool_calls"` branch
-exits the `cart_check` phase.
+Add a new hook just before the current `return messages, "no_tool_calls"` branch exits the `cart_check` phase.
 
 ### Required behavior
 
@@ -1625,6 +1680,17 @@ Extend `SystemConfig` / config plumbing with fields like:
 - `inject_transient_notice`
 - `execution_contract_cache_dir`
 - `task_checklist_cache_dir`
+- `block_on_mutation_mode` (enum: `auto` | `never` | `always`; default `auto`) — `auto` uses the §13.3 predicate; `never` forces `APPROVE_WITH_NUDGE` for every `provide_guidance`; `always` restores v1.2 semantics (for ablation only).
+- `max_hard_blocks_per_args` (int; default `2`) — after this many hard blocks of the same `(tool, args_hash)`, the gate escalates to forced-approve.
+- `require_cited_violation_for_block` (bool; default `true`) — if `true`, condition 2 of the block predicate is enforced.
+- `overseer_call_budget_per_task` (int; default `8`) — hard cap on P2+P3 invocations per task. When exceeded, further triggers auto-approve and log `overseer_budget_exhausted`. Ablation-only override: set to `-1` for unlimited.
+
+
+> **Note (v1.3):** `loop_repeat_count` retains its role for the *loop detection
+> trigger itself* (a repeat threshold on executed non-mutating calls), but no
+> longer drives run termination. The former termination path
+> `oversight_blocked_repeat_limit` is removed; see §15.2 forced-approve
+> escalation.
 
 ### Keep fixed in v1
 
@@ -1645,18 +1711,22 @@ Remove or override the stale `qwen3-14b` fallback in orchestration.
 
 These are the recommended initial operational defaults.
 
-| Parameter                                    |                           Default |
-| -------------------------------------------- | --------------------------------: |
-| Loop repeat count                            |                                 3 |
-| Loop window                                  |             5 executed tool calls |
-| Similarity threshold                         |                              0.92 |
-| Coverage threshold                           |                              0.50 |
-| Coverage checkpoint timing                   |    initial -> cart_check boundary |
-| Recent context length for overseer           | last 5 executed tool interactions |
-| Final repair retry cap                       |                                 2 |
-| Max notice lines                             |                                 3 |
-| Max notice length                            |                        ~120 words |
-| Mandatory cart freshness before final verify |                               yes |
+| Parameter | Default |
+|---|---:|
+| Loop repeat count (trigger threshold only; see §15.2) | 3 |
+| Loop window | 5 executed tool calls |
+| Similarity threshold | 0.92 |
+| Coverage threshold | 0.50 |
+| Coverage checkpoint timing | initial → cart_check boundary |
+| Recent context length for overseer | last 5 executed tool interactions |
+| Final repair retry cap | 2 |
+| Max notice lines | 3 |
+| Max notice length | ~120 words |
+| Mandatory cart freshness before final verify | yes |
+| **`block_on_mutation_mode`** | **`auto`** |
+| **`max_hard_blocks_per_args`** | **`2`** |
+| **`require_cited_violation_for_block`** | **`true`** |
+| **`overseer_call_budget_per_task`** | **`8`** |
 
 ### What to leave configurable
 
@@ -1665,15 +1735,18 @@ These are the recommended initial operational defaults.
 - coverage threshold
 - recent context length
 - final retry cap
-- mutating tool set
+- mutating tool set and per-tool reversibility
 - prompt version
+- `block_on_mutation_mode`
+- `max_hard_blocks_per_args`
+- `require_cited_violation_for_block`
+- `overseer_call_budget_per_task`
 
 ### What not to parameterize yet
 
 - staged final verification itself
 - phase-boundary midpoint choice
 - transient request-only intervention semantics
-
 ---
 
 ## 19. Risks and mitigations
@@ -1713,12 +1786,19 @@ These are the recommended initial operational defaults.
 
 **Cause:** too aggressive interventions or too much free-form guidance.
 
+**Empirical note (v1.3).** This risk materialized concretely in the
+2026-04-17 smoke tests: the overseer blocked each reversible cart addition
+on "insufficient evidence" grounds, producing a 0.00 match rate versus 0.80
+for the matching A baseline. See §1 of the patch document and Risk 10.
+
 **Mitigation:**
 
-- default to approve
-- keep notices short and evidence-linked
-- use high-precision trigger conditions
-- reserve strongest intervention for final checkpoint
+- Default to approve; `provide_guidance` is approve-with-nudge, not block
+  (§13.1, §13.3).
+- Keep notices short and evidence-linked.
+- Use high-precision trigger conditions.
+- Require a cited contract rule or checklist key for any hard block.
+- Reserve strongest intervention for final checkpoint.
 
 ---
 
@@ -1727,6 +1807,30 @@ These are the recommended initial operational defaults.
 **Cause:** final verifier repeatedly refuses approval.
 
 **Mitigation:** cap repair retries at 2 and log exhaustion.
+
+---
+
+### Risk 10 — overseer deadlocks the run on reversible mutations
+
+**Cause:** overseer returns `provide_guidance` + implicit block on every
+pre-mutation invocation (verification-maximalist failure mode). Combined
+with a low call budget this empties the cart and kills the run.
+
+**Empirical evidence:** observed in 2026-04-17 smoke tests
+(`shopping-c-smoke`, `shopping-c-smoke-v2`); both runs terminated with
+`oversight_blocked_repeat_limit` and carts containing 0 and 1 items
+respectively versus 5 items in the A baselines.
+
+**Mitigation:**
+
+- Reversibility-gated H1 block predicate (§13.3, §15.2).
+- Forced-approve escalation after `max_hard_blocks_per_args` on the same
+  `(tool, args_hash)`.
+- Removal of the `oversight_blocked_repeat_limit` termination path.
+- Per-task overseer call budget.
+- Pilot validation rule: if pilot C2 match rate is below A by more than
+  0.10 on 10 tasks, set `block_on_mutation_mode = never` and re-pilot
+  before scaling.
 
 ---
 
@@ -1767,12 +1871,11 @@ These are the recommended initial operational defaults.
 
 ### Risk 9 — criticism that context pruning in thesis prose conflicts with faithfulness
 
-**Mitigation:** explicitly defer post-correction context pruning from v1 and
-state why.
+**Mitigation:** explicitly defer post-correction context pruning from v1 and state why.
 
 ---
 
-## 20. What should _not_ be built in v1
+## 20. What should *not* be built in v1
 
 Do **not** build any of the following in the first C2-lite implementation:
 
@@ -1789,8 +1892,7 @@ Do **not** build any of the following in the first C2-lite implementation:
 - restart trees / MCTS / search-heavy replanning
 - extra LLM prompt families beyond the four defined here
 
-These can be discussed as future work or later ablations, but should not enter
-v1.
+These can be discussed as future work or later ablations, but should not enter v1.
 
 ---
 
@@ -1798,13 +1900,9 @@ v1.
 
 ### 21.1 One-sentence summary
 
-The chosen C2-lite v1.2 design is:
+The chosen C2-lite v1.3 design is:
 
-> a rule-triggered, generic selective-oversight scaffold whose runtime decisions
-> are grounded in a compiled execution contract derived from the executor’s own
-> system prompt and tool schema, and whose interventions are injected
-> transiently into the next executor request without rewriting stored benchmark
-> history.
+> a rule-triggered, generic selective-oversight scaffold whose runtime decisions are grounded in a compiled execution contract derived from the executor’s own system prompt and tool schema, whose interventions are injected transiently into the next executor request without rewriting stored benchmark history, and whose pre-execution block rule is reversibility-gated so that reversible mutations default to approve-with-nudge rather than hard-block.
 
 ### 21.2 Concrete implementation stance
 
@@ -1823,19 +1921,20 @@ The chosen C2-lite v1.2 design is:
 
 Because it simultaneously achieves:
 
-1. **repo fit** It aligns with the current two-phase Shopping loop and existing
-   oversight stub.
+1. **repo fit**  
+   It aligns with the current two-phase Shopping loop and existing oversight stub.
 
-2. **cost discipline** Oversight remains selective and compact-state based.
+2. **cost discipline**  
+   Oversight remains selective and compact-state based.
 
-3. **clean ablations** Each trigger maps cleanly to your planned C2 ablation
-   family.
+3. **clean ablations**  
+   Each trigger maps cleanly to your planned C2 ablation family.
 
-4. **methodological clarity** The overseer is generic, but still grounded in the
-   same task contract the executor actually received.
+4. **methodological clarity**  
+   The overseer is generic, but still grounded in the same task contract the executor actually received.
 
-5. **implementation realism** It requires wrapper and state changes, not a
-   redesign of the whole benchmark stack.
+5. **implementation realism**  
+   It requires wrapper and state changes, not a redesign of the whole benchmark stack.
 
 ---
 
@@ -1845,8 +1944,7 @@ Use this section as the tightest summary.
 
 ### Chosen architecture
 
-Implement **C2-lite v1.2** as a selective oversight controller around the
-existing Shopping wrapper.
+Implement **C2-lite v1.3** as a selective oversight controller around the existing Shopping wrapper.
 
 ### Core principle
 
@@ -1931,20 +2029,19 @@ Do not build:
 
 ### Immediate implementation priority order
 
-1. add missing hook points
-2. add runtime state extensions
-3. implement contract/checklist compilers
-4. implement P2/P3 prompt plumbing
-5. implement deterministic notice injection
-6. extend logging/config
+1. add missing hook points  
+2. add runtime state extensions  
+3. implement contract/checklist compilers  
+4. implement P2/P3 prompt plumbing  
+5. implement deterministic notice injection  
+6. extend logging/config  
 7. remove stale executor fallback
 
 ---
 
 ## 23. End state expected from the next chat
 
-The next chat should transform this memo into a handoff-grade implementation
-plan with:
+The next chat should transform this memo into a handoff-grade implementation plan with:
 
 - concrete file-by-file patch plan,
 - exact data class changes,

@@ -70,12 +70,15 @@ class ConversationState:
     blocked_mutation_repeat_count: int = 0
     last_blocked_mutation_tool_name: str | None = None
     last_blocked_mutation_arguments_normalized: str | None = None
+    blocked_mutation_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    overseer_invocation_count: int = 0
     overseer_invocation_count_by_trigger: dict[str, int] = field(default_factory=dict)
     intervention_count_by_action: dict[str, int] = field(default_factory=dict)
     executor_cost_usd: float = 0.0
     overseer_cost_usd: float = 0.0
     _executor_cost_known: bool = field(default=False, init=False, repr=False)
     _overseer_cost_known: bool = field(default=False, init=False, repr=False)
+    _budget_exhaustion_logged: bool = field(default=False, init=False, repr=False)
 
     def begin(self) -> None:
         if not self.start_time:
@@ -96,6 +99,7 @@ class ConversationState:
 
     def record_overseer_call(self, response: Any, *, cost: float | None = None) -> None:
         self.overseer_calls += 1
+        self.overseer_invocation_count += 1
         usage = getattr(response, "usage", None)
         if usage is not None:
             self.overseer_tokens_in += int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -137,6 +141,9 @@ class ConversationState:
         self.blocked_mutation_count += 1
         self.last_blocked_mutation_tool_name = tool_name
         self.last_blocked_mutation_arguments_normalized = arguments_normalized
+        args_hash_key = _hash_arguments(arguments)
+        key = (tool_name, args_hash_key)
+        self.blocked_mutation_counts[key] = self.blocked_mutation_counts.get(key, 0) + 1
         return self.blocked_mutation_repeat_count
 
     def record_oversight_decision(
@@ -208,6 +215,7 @@ class ConversationState:
             self.blocked_mutation_repeat_count = 0
             self.last_blocked_mutation_tool_name = None
             self.last_blocked_mutation_arguments_normalized = None
+            self.blocked_mutation_counts.clear()
 
     def record_final_outcome(
         self, *, stop_reason: str, output: str | None, max_steps_hit: bool
@@ -257,6 +265,14 @@ class ConversationState:
             "final_verification_retry_count": self.final_verification_retry_count,
             "blocked_mutation_count": self.blocked_mutation_count,
             "blocked_mutation_repeat_count": self.blocked_mutation_repeat_count,
+            "blocked_mutation_counts": {
+                f"{tool_name}|{args_hash}": count
+                for (
+                    tool_name,
+                    args_hash,
+                ), count in self.blocked_mutation_counts.items()
+            },
+            "overseer_invocation_count": self.overseer_invocation_count,
             "overseer_invocation_count_by_trigger": self.overseer_invocation_count_by_trigger,
             "intervention_count_by_action": self.intervention_count_by_action,
             "wall_time_seconds": self.wall_time_seconds,

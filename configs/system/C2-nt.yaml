@@ -2,7 +2,7 @@ name: C2-nt
 oversight_enabled: true
 oversight_mode: adaptive
 overseer_thinking: false
-overseer_prompt_version: c2-lite-v1.2
+overseer_prompt_version: c2-lite-v1.3
 loop_similarity_threshold: 0.92
 loop_window: 5
 loop_repeat_count: 3
@@ -15,3 +15,8 @@ mutating_tools:
   - delete_product_from_cart
   - add_coupon_to_cart
   - delete_coupon_from_cart
+irreversible_tools: []
+block_on_mutation_mode: auto
+max_hard_blocks_per_args: 2
+require_cited_violation_for_block: true
+overseer_call_budget_per_task: 8

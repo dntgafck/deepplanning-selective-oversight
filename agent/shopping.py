@@ -26,12 +26,17 @@ from llm import (
     extract_usage_tokens,
     flush_langfuse,
 )
-from oversight import ConversationState, apply_intervention, evaluate_oversight
+from oversight import (
+    ConversationState,
+    H1Outcome,
+    apply_intervention,
+    compute_h1_outcome,
+    evaluate_oversight,
+)
 from oversight.contracts import (
     load_or_build_execution_contract_with_metadata,
     load_or_build_task_checklist_with_metadata,
 )
-from oversight.triggers import render_transient_notice
 
 from .base import TaskResult
 from .vendor import (
@@ -42,6 +47,7 @@ from .vendor import (
 
 VendorShoppingFnAgent = load_shopping_agent_class()
 DEFAULT_INFRA_RETRY_LIMIT = 2
+# Deprecated log-compat constant. v1.3 should not emit this from the H1 path.
 REPEATED_BLOCK_STOP_REASON = "oversight_blocked_repeat_limit"
 DEBUG_MESSAGES_ROOT = OUTPUT_ROOT / "_debug_messages" / "shopping"
 TRANSIENT_NOTICE_ROLE = "user"
@@ -119,32 +125,38 @@ def _build_request_messages(
     return request_messages
 
 
-def _repeated_block_notice(action: Any, *, terminating: bool) -> str | None:
-    trigger_type = getattr(action, "trigger_type", None)
-    if not trigger_type:
-        return None
-    tool_name = str(getattr(action, "blocked_tool_name", "") or "").strip()
-    lead = (
-        f"Stop after repeated blocked {tool_name} mutations and fail this run cleanly."
-        if terminating and tool_name
-        else (
-            "Stop after repeated blocked cart mutations and fail this run cleanly."
-            if terminating
-            else (
-                f"Repeated blocked {tool_name} mutation detected. Verify a different candidate or read the cart before mutating again."
-                if tool_name
-                else "Repeated blocked cart mutation detected. Verify a different candidate or read the cart before mutating again."
-            )
-        )
+def _overseer_budget_remaining(state: ConversationState, system_config: Any) -> bool:
+    budget = int(getattr(system_config, "overseer_call_budget_per_task", 8))
+    if budget < 0:
+        return True
+    return state.overseer_invocation_count < budget
+
+
+async def _maybe_log_budget_exhausted(
+    *,
+    logger: StructuredLogger | None,
+    state: ConversationState,
+    run_id: int,
+    phase: str,
+    step_index: int,
+    system_config: Any,
+) -> None:
+    if logger is None or state._budget_exhaustion_logged:
+        state._budget_exhaustion_logged = True
+        return
+    await logger.log_event(
+        "oversight_budget_exhausted",
+        {
+            "domain": "shopping",
+            "task_id": state.task_id,
+            "run_id": run_id,
+            "phase": phase,
+            "step_index": step_index,
+            "overseer_invocation_count": state.overseer_invocation_count,
+            "budget": int(getattr(system_config, "overseer_call_budget_per_task", 8)),
+        },
     )
-    follow_ups = list(getattr(action, "guidance_lines", []))
-    corrected_observation = getattr(action, "corrected_observation", None)
-    if corrected_observation:
-        follow_ups = [corrected_observation] + follow_ups
-    return render_transient_notice(
-        trigger_type=trigger_type,
-        lines=[lead] + follow_ups,
-    )
+    state._budget_exhaustion_logged = True
 
 
 async def _log_oversight_artifact(
@@ -255,6 +267,7 @@ async def _log_oversight_step(
             "fallback_guidance_used": bool(
                 getattr(action, "fallback_guidance_used", False)
             ),
+            "h1_outcome": getattr(action, "h1_outcome", None),
             "blocked_tool_name": getattr(action, "blocked_tool_name", None),
             "blocked_mutation_repeat_count": getattr(
                 action,
@@ -300,6 +313,29 @@ async def _maybe_log_overseer_error(
             "overseer_mode": getattr(action, "overseer_mode", "disabled"),
         },
     )
+
+
+async def _evaluate_oversight_with_budget(
+    *,
+    logger: StructuredLogger | None,
+    budget_state: ConversationState,
+    run_id: int,
+    budget_phase: str,
+    budget_step_index: int,
+    budget_system_config: Any,
+    **kwargs: Any,
+) -> Any | None:
+    if _overseer_budget_remaining(budget_state, budget_system_config):
+        return await evaluate_oversight(**kwargs)
+    await _maybe_log_budget_exhausted(
+        logger=logger,
+        state=budget_state,
+        run_id=run_id,
+        phase=budget_phase,
+        step_index=budget_step_index,
+        system_config=budget_system_config,
+    )
+    return None
 
 
 def _adaptive_shopping_oversight_active(
@@ -519,7 +555,13 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 state=state,
             )
         if oversight_active:
-            midpoint_action = await evaluate_oversight(
+            midpoint_action = await _evaluate_oversight_with_budget(
+                logger=logger,
+                budget_state=state,
+                run_id=run_id,
+                budget_phase="initial",
+                budget_step_index=initial_last_step,
+                budget_system_config=system_config,
                 hook="midpoint",
                 state=state,
                 system_config=system_config,
@@ -527,30 +569,31 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 task_query=user_query,
                 step_index=initial_last_step,
             )
-            state.record_oversight_decision(initial_last_step, midpoint_action)
-            await _log_oversight_step(
-                logger=logger,
-                state=state,
-                run_id=run_id,
-                phase="initial",
-                step_index=initial_last_step,
-                tool_index=None,
-                action=midpoint_action,
-                executor_input_tokens=0,
-                executor_output_tokens=0,
-                executor_cost=None,
-            )
-            await _maybe_log_overseer_error(
-                logger=logger,
-                state=state,
-                run_id=run_id,
-                phase="initial",
-                step_index=initial_last_step,
-                tool_index=None,
-                action=midpoint_action,
-            )
-            if midpoint_action.should_intervene:
-                await apply_intervention(state=state, action=midpoint_action)
+            if midpoint_action is not None:
+                state.record_oversight_decision(initial_last_step, midpoint_action)
+                await _log_oversight_step(
+                    logger=logger,
+                    state=state,
+                    run_id=run_id,
+                    phase="initial",
+                    step_index=initial_last_step,
+                    tool_index=None,
+                    action=midpoint_action,
+                    executor_input_tokens=0,
+                    executor_output_tokens=0,
+                    executor_cost=None,
+                )
+                await _maybe_log_overseer_error(
+                    logger=logger,
+                    state=state,
+                    run_id=run_id,
+                    phase="initial",
+                    step_index=initial_last_step,
+                    tool_index=None,
+                    action=midpoint_action,
+                )
+                if midpoint_action.should_intervene:
+                    await apply_intervention(state=state, action=midpoint_action)
 
         messages = self._add_to_cart(messages)
         messages, phase_stop_reason, _ = await self._run_phase(
@@ -692,7 +735,13 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             assistant_payload = _assistant_message_to_dict(assistant_message, calls)
 
             if calls and _adaptive_shopping_oversight_active(state, system_config):
-                pre_tool_action = await evaluate_oversight(
+                pre_tool_action = await _evaluate_oversight_with_budget(
+                    logger=logger,
+                    budget_state=state,
+                    run_id=run_id,
+                    budget_phase=phase_name,
+                    budget_step_index=step_count,
+                    budget_system_config=system_config,
                     hook="pre_tool",
                     state=state,
                     system_config=system_config,
@@ -701,124 +750,58 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     proposed_tool_calls=calls,
                     step_index=step_count,
                 )
-                if (
-                    pre_tool_action.should_intervene
-                    and pre_tool_action.block_current_tool
-                    and pre_tool_action.blocked_tool_name
-                ):
-                    repeat_count = state.record_blocked_mutation_attempt(
-                        tool_name=str(pre_tool_action.blocked_tool_name),
-                        arguments=pre_tool_action.blocked_tool_arguments,
-                        similarity_threshold=float(
-                            getattr(system_config, "loop_similarity_threshold", 0.92)
-                        ),
-                    )
-                    pre_tool_action.blocked_mutation_repeat_count = repeat_count
-                    repeat_limit = int(getattr(system_config, "loop_repeat_count", 3))
-                    if repeat_count >= repeat_limit:
-                        pre_tool_action.terminate_phase = True
-                        pre_tool_action.termination_reason = REPEATED_BLOCK_STOP_REASON
-                        pre_tool_action.notice_text = _repeated_block_notice(
-                            pre_tool_action,
-                            terminating=True,
+                if pre_tool_action is not None:
+                    h1_outcome = H1Outcome.APPROVE_CONTINUE
+                    if (
+                        pre_tool_action.should_intervene
+                        and pre_tool_action.blocked_tool_name
+                    ):
+                        h1_outcome = compute_h1_outcome(
+                            action=pre_tool_action,
+                            tool_name=str(pre_tool_action.blocked_tool_name),
+                            arguments=pre_tool_action.blocked_tool_arguments,
+                            state=state,
+                            system_config=system_config,
                         )
-                        pre_tool_action.notice_source = "repeat_limit_termination"
-                        pre_tool_action.notice_rendered = (
-                            pre_tool_action.notice_text is not None
-                        )
-                    elif repeat_count > 1:
-                        pre_tool_action.notice_text = _repeated_block_notice(
-                            pre_tool_action,
-                            terminating=False,
-                        )
-                        pre_tool_action.notice_source = "repeat_guard_escalation"
-                        pre_tool_action.notice_rendered = (
-                            pre_tool_action.notice_text is not None
-                        )
-                state.record_oversight_decision(step_count, pre_tool_action)
-                await _log_oversight_step(
-                    logger=logger,
-                    state=state,
-                    run_id=run_id,
-                    phase=phase_name,
-                    step_index=step_count,
-                    tool_index=0 if calls else None,
-                    action=pre_tool_action,
-                    executor_input_tokens=prompt_tokens,
-                    executor_output_tokens=completion_tokens,
-                    executor_cost=executor_cost,
-                )
-                await _maybe_log_overseer_error(
-                    logger=logger,
-                    state=state,
-                    run_id=run_id,
-                    phase=phase_name,
-                    step_index=step_count,
-                    tool_index=0 if calls else None,
-                    action=pre_tool_action,
-                )
-                if (
-                    pre_tool_action.should_intervene
-                    and pre_tool_action.block_current_tool
-                ):
-                    await apply_intervention(state=state, action=pre_tool_action)
-                    if save_messages and messages_file is not None:
-                        self._save_messages(
-                            messages,
-                            messages_file,
-                            step_count,
-                            f"Oversight blocked tool batch ({phase_name})",
-                        )
-                    if logger is not None:
-                        await logger.log_turn(
-                            domain="shopping",
-                            task_id=state.task_id,
-                            run_id=run_id,
-                            phase=phase_name,
-                            turn_index=step_count,
-                            started_at=started_at,
-                            ended_at=ended_at,
-                            request_messages=request_messages,
-                            raw_response=response,
-                            parsed_tool_calls=calls,
-                            parse_warnings=parse_warnings,
-                            tool_results=[],
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            stop_reason=(
-                                REPEATED_BLOCK_STOP_REASON
-                                if pre_tool_action.terminate_phase
-                                else "oversight_blocked"
-                            ),
-                            model_alias=system_config.executor_provider.alias,
-                        )
-                    if pre_tool_action.terminate_phase:
-                        return messages, REPEATED_BLOCK_STOP_REASON, step_count
-                    continue
 
-            tool_results: list[dict[str, Any]] = []
-            if not calls:
-                if phase_name == "cart_check" and _adaptive_shopping_oversight_active(
-                    state, system_config
-                ):
-                    final_action = await evaluate_oversight(
-                        hook="final",
-                        state=state,
-                        system_config=system_config,
-                        phase="cart_check",
-                        task_query=task_query,
-                        draft_final_answer=str(assistant_payload.get("content") or ""),
-                        step_index=step_count,
-                    )
-                    state.record_oversight_decision(step_count, final_action)
+                    pre_tool_action.h1_outcome = h1_outcome.value
+                    if h1_outcome == H1Outcome.HARD_BLOCK:
+                        pre_tool_action.block_current_tool = True
+                        repeat_count = state.record_blocked_mutation_attempt(
+                            tool_name=str(pre_tool_action.blocked_tool_name),
+                            arguments=pre_tool_action.blocked_tool_arguments,
+                            similarity_threshold=float(
+                                getattr(
+                                    system_config,
+                                    "loop_similarity_threshold",
+                                    0.92,
+                                )
+                            ),
+                        )
+                        pre_tool_action.blocked_mutation_repeat_count = repeat_count
+                    elif h1_outcome == H1Outcome.FORCED_APPROVE:
+                        pre_tool_action.block_current_tool = False
+                        pre_tool_action.intervention_type = "overseer_override_forced"
+                        pre_tool_action.notice_text = None
+                        pre_tool_action.notice_rendered = False
+                        pre_tool_action.notice_source = None
+                    elif h1_outcome == H1Outcome.APPROVE_WITH_NUDGE:
+                        pre_tool_action.block_current_tool = False
+                    else:
+                        pre_tool_action.block_current_tool = False
+                        pre_tool_action.notice_text = None
+                        pre_tool_action.notice_rendered = False
+                        pre_tool_action.notice_source = None
+
+                    state.record_oversight_decision(step_count, pre_tool_action)
                     await _log_oversight_step(
                         logger=logger,
                         state=state,
                         run_id=run_id,
                         phase=phase_name,
                         step_index=step_count,
-                        tool_index=None,
-                        action=final_action,
+                        tool_index=0 if calls else None,
+                        action=pre_tool_action,
                         executor_input_tokens=prompt_tokens,
                         executor_output_tokens=completion_tokens,
                         executor_cost=executor_cost,
@@ -829,17 +812,91 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         run_id=run_id,
                         phase=phase_name,
                         step_index=step_count,
-                        tool_index=None,
-                        action=final_action,
+                        tool_index=0 if calls else None,
+                        action=pre_tool_action,
                     )
-                    if final_action.should_intervene:
-                        await apply_intervention(state=state, action=final_action)
-                        if (
-                            final_action.final_verification_result
-                            == "retry_cap_exhausted"
-                        ):
-                            return messages, "no_tool_calls", step_count
+                    if pre_tool_action.notice_text:
+                        await apply_intervention(state=state, action=pre_tool_action)
+                    if h1_outcome == H1Outcome.HARD_BLOCK:
+                        if save_messages and messages_file is not None:
+                            self._save_messages(
+                                messages,
+                                messages_file,
+                                step_count,
+                                f"Oversight blocked tool batch ({phase_name})",
+                            )
+                        if logger is not None:
+                            await logger.log_turn(
+                                domain="shopping",
+                                task_id=state.task_id,
+                                run_id=run_id,
+                                phase=phase_name,
+                                turn_index=step_count,
+                                started_at=started_at,
+                                ended_at=ended_at,
+                                request_messages=request_messages,
+                                raw_response=response,
+                                parsed_tool_calls=calls,
+                                parse_warnings=parse_warnings,
+                                tool_results=[],
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                stop_reason="oversight_blocked",
+                                model_alias=system_config.executor_provider.alias,
+                            )
                         continue
+
+            tool_results: list[dict[str, Any]] = []
+            if not calls:
+                if phase_name == "cart_check" and _adaptive_shopping_oversight_active(
+                    state, system_config
+                ):
+                    final_action = await _evaluate_oversight_with_budget(
+                        logger=logger,
+                        budget_state=state,
+                        run_id=run_id,
+                        budget_phase=phase_name,
+                        budget_step_index=step_count,
+                        budget_system_config=system_config,
+                        hook="final",
+                        state=state,
+                        system_config=system_config,
+                        phase="cart_check",
+                        task_query=task_query,
+                        draft_final_answer=str(assistant_payload.get("content") or ""),
+                        step_index=step_count,
+                    )
+                    if final_action is not None:
+                        state.record_oversight_decision(step_count, final_action)
+                        await _log_oversight_step(
+                            logger=logger,
+                            state=state,
+                            run_id=run_id,
+                            phase=phase_name,
+                            step_index=step_count,
+                            tool_index=None,
+                            action=final_action,
+                            executor_input_tokens=prompt_tokens,
+                            executor_output_tokens=completion_tokens,
+                            executor_cost=executor_cost,
+                        )
+                        await _maybe_log_overseer_error(
+                            logger=logger,
+                            state=state,
+                            run_id=run_id,
+                            phase=phase_name,
+                            step_index=step_count,
+                            tool_index=None,
+                            action=final_action,
+                        )
+                        if final_action.should_intervene:
+                            await apply_intervention(state=state, action=final_action)
+                            if (
+                                final_action.final_verification_result
+                                == "retry_cap_exhausted"
+                            ):
+                                return messages, "no_tool_calls", step_count
+                            continue
 
                 messages.append(assistant_payload)
                 if save_messages and messages_file is not None:
@@ -911,7 +968,13 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 if not turn_has_pending_notice and _adaptive_shopping_oversight_active(
                     state, system_config
                 ):
-                    post_tool_action = await evaluate_oversight(
+                    post_tool_action = await _evaluate_oversight_with_budget(
+                        logger=logger,
+                        budget_state=state,
+                        run_id=run_id,
+                        budget_phase=phase_name,
+                        budget_step_index=step_count,
+                        budget_system_config=system_config,
                         hook="post_tool",
                         state=state,
                         system_config=system_config,
@@ -921,37 +984,41 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         step_index=step_count,
                         tool_index=tool_index,
                     )
-                    state.record_oversight_decision(
-                        step_count,
-                        post_tool_action,
-                        tool_index=tool_index,
-                    )
-                    await _log_oversight_step(
-                        logger=logger,
-                        state=state,
-                        run_id=run_id,
-                        phase=phase_name,
-                        step_index=step_count,
-                        tool_index=tool_index,
-                        action=post_tool_action,
-                        executor_input_tokens=prompt_tokens,
-                        executor_output_tokens=completion_tokens,
-                        executor_cost=executor_cost,
-                    )
-                    await _maybe_log_overseer_error(
-                        logger=logger,
-                        state=state,
-                        run_id=run_id,
-                        phase=phase_name,
-                        step_index=step_count,
-                        tool_index=tool_index,
-                        action=post_tool_action,
-                    )
-                    if post_tool_action.should_intervene:
-                        await apply_intervention(state=state, action=post_tool_action)
-                        turn_has_pending_notice = (
-                            state.pending_executor_notice is not None
+                    if post_tool_action is not None:
+                        state.record_oversight_decision(
+                            step_count,
+                            post_tool_action,
+                            tool_index=tool_index,
                         )
+                        await _log_oversight_step(
+                            logger=logger,
+                            state=state,
+                            run_id=run_id,
+                            phase=phase_name,
+                            step_index=step_count,
+                            tool_index=tool_index,
+                            action=post_tool_action,
+                            executor_input_tokens=prompt_tokens,
+                            executor_output_tokens=completion_tokens,
+                            executor_cost=executor_cost,
+                        )
+                        await _maybe_log_overseer_error(
+                            logger=logger,
+                            state=state,
+                            run_id=run_id,
+                            phase=phase_name,
+                            step_index=step_count,
+                            tool_index=tool_index,
+                            action=post_tool_action,
+                        )
+                        if post_tool_action.should_intervene:
+                            await apply_intervention(
+                                state=state,
+                                action=post_tool_action,
+                            )
+                            turn_has_pending_notice = (
+                                state.pending_executor_notice is not None
+                            )
             if save_messages and messages_file is not None:
                 self._save_messages(
                     messages,

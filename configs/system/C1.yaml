@@ -2,3 +2,9 @@ name: C1
 oversight_enabled: true
 oversight_mode: checkpoint
 overseer_thinking: true
+overseer_prompt_version: c2-lite-v1.3
+irreversible_tools: []
+block_on_mutation_mode: auto
+max_hard_blocks_per_args: 2
+require_cited_violation_for_block: true
+overseer_call_budget_per_task: 8
