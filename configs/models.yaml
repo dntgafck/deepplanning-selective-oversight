@@ -11,17 +11,21 @@ models:
         enabled: false
     max_retries: 30
     backoff: 1.5
+    input_cost_per_million_usd: 0.10
+    output_cost_per_million_usd: 0.15
 
   deepseek-v3.2:
-    model_name: deepseek-ai/deepseek-v3.2
+    model_name: deepseek-reasoner
     model_type: openai
-    base_url: https://integrate.api.nvidia.com/v1
-    api_key_env: NVIDIA_API_KEY
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
     extra_body:
-      chat_template_kwargs:
-        thinking: true
+      reasoning:
+        enabled: true
     max_retries: 30
     backoff: 1.5
+    input_cost_per_million_usd: null
+    output_cost_per_million_usd: null
 
   qwen-plus:
     model_name: qwen/qwen3-235b-a22b-2507
@@ -30,3 +34,5 @@ models:
     api_key_env: OPENROUTER_API_KEY
     max_retries: 30
     backoff: 1.5
+    input_cost_per_million_usd: null
+    output_cost_per_million_usd: null

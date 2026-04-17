@@ -259,7 +259,7 @@ def _executor_models(cfg: Any) -> list[str]:
         if OmegaConf.is_config(cfg.models.executor)
         else cfg.models.executor
     )
-    return normalize_string_list(value) or ["qwen3-14b"]
+    return normalize_string_list(value) or ["qwen3.5-9b"]
 
 
 def _domain_names(cfg: Any) -> list[str]:

@@ -16,6 +16,20 @@ class SystemConfig:
     overseer_thinking: bool | None = None
     max_steps: int = 400
     num_runs: int = 1
+    overseer_prompt_version: str = "c2-lite-v1.2"
+    loop_similarity_threshold: float = 0.92
+    loop_window: int = 5
+    loop_repeat_count: int = 3
+    coverage_threshold: float = 0.50
+    final_repair_retry_cap: int = 2
+    recent_tool_window: int = 5
+    inject_transient_notice: bool = True
+    mutating_tools: tuple[str, ...] = (
+        "add_product_to_cart",
+        "delete_product_from_cart",
+        "add_coupon_to_cart",
+        "delete_coupon_from_cart",
+    )
 
 
 def build_system_config(
@@ -47,4 +61,28 @@ def build_system_config(
         overseer_thinking=defaults.get("overseer_thinking"),
         max_steps=max_steps,
         num_runs=num_runs,
+        overseer_prompt_version=str(
+            defaults.get("overseer_prompt_version", "c2-lite-v1.2")
+        ),
+        loop_similarity_threshold=float(
+            defaults.get("loop_similarity_threshold", 0.92)
+        ),
+        loop_window=int(defaults.get("loop_window", 5)),
+        loop_repeat_count=int(defaults.get("loop_repeat_count", 3)),
+        coverage_threshold=float(defaults.get("coverage_threshold", 0.50)),
+        final_repair_retry_cap=int(defaults.get("final_repair_retry_cap", 2)),
+        recent_tool_window=int(defaults.get("recent_tool_window", 5)),
+        inject_transient_notice=bool(defaults.get("inject_transient_notice", True)),
+        mutating_tools=tuple(
+            str(tool_name)
+            for tool_name in defaults.get(
+                "mutating_tools",
+                (
+                    "add_product_to_cart",
+                    "delete_product_from_cart",
+                    "add_coupon_to_cart",
+                    "delete_coupon_from_cart",
+                ),
+            )
+        ),
     )

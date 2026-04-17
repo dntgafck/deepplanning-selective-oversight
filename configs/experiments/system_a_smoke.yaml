@@ -8,7 +8,7 @@ domains:
   - travel
   - shopping
 models:
-  executor: qwen3-14b
+  executor: qwen3.5-9b
 runtime:
   workers: 1
   max_llm_calls: 20

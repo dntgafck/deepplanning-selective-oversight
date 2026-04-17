@@ -301,32 +301,36 @@ class StructuredLogger:
         completion_tokens: int,
         stop_reason: str,
         model_alias: str,
+        transient_notice_injected: bool | None = None,
+        transient_notice_text: str | None = None,
     ) -> None:
         started_at_dt = _coerce_datetime(started_at)
         ended_at_dt = _coerce_datetime(ended_at)
         duration_ms = int((ended_at_dt - started_at_dt).total_seconds() * 1000)
-        await self.log_event(
-            "executor_turn",
-            {
-                "domain": domain,
-                "task_id": task_id,
-                "run_id": run_id,
-                "phase": phase,
-                "turn_index": turn_index,
-                "started_at": _isoformat_utc(started_at_dt),
-                "ended_at": _isoformat_utc(ended_at_dt),
-                "duration_ms": duration_ms,
-                "request_messages": serialize_messages(request_messages),
-                "raw_response": serialize_response(raw_response),
-                "parsed_tool_calls": _to_jsonable(parsed_tool_calls),
-                "parse_warnings": list(parse_warnings),
-                "tool_results": _to_jsonable(tool_results),
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "stop_reason": stop_reason,
-                "model_alias": model_alias,
-            },
-        )
+        payload = {
+            "domain": domain,
+            "task_id": task_id,
+            "run_id": run_id,
+            "phase": phase,
+            "turn_index": turn_index,
+            "started_at": _isoformat_utc(started_at_dt),
+            "ended_at": _isoformat_utc(ended_at_dt),
+            "duration_ms": duration_ms,
+            "request_messages": serialize_messages(request_messages),
+            "raw_response": serialize_response(raw_response),
+            "parsed_tool_calls": _to_jsonable(parsed_tool_calls),
+            "parse_warnings": list(parse_warnings),
+            "tool_results": _to_jsonable(tool_results),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "stop_reason": stop_reason,
+            "model_alias": model_alias,
+        }
+        if transient_notice_injected is not None:
+            payload["transient_notice_injected"] = transient_notice_injected
+        if transient_notice_text:
+            payload["transient_notice_text"] = transient_notice_text
+        await self.log_event("executor_turn", payload)
 
     async def log_result(self, payload: dict[str, Any]) -> None:
         if self.output_dir is None or self.results_path is None:

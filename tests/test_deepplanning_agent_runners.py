@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from omegaconf import OmegaConf
 
+import oversight as oversight_module
 from agent import shopping as shopping_module
 from agent import travel as travel_module
 from deepplanning import aggregation as aggregation_module
@@ -18,6 +19,7 @@ from deepplanning import shopping_runner as shopping_runtime_module
 from deepplanning import travel_runner as travel_runtime_module
 from experiment import StructuredLogger, build_system_config
 from oversight import ConversationState
+from oversight import contracts as oversight_contracts
 from scripts import run_experiment as experiment_script
 from scripts.deepplanning_common import (
     filter_samples_by_ids,
@@ -120,6 +122,79 @@ class FakeResponse:
         self.usage = FakeUsage(prompt_tokens, completion_tokens)
 
 
+def _fake_json_response(
+    payload: dict[str, object],
+    *,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> FakeResponse:
+    return FakeResponse(
+        content=json.dumps(payload),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def _shopping_contract_payload() -> dict[str, object]:
+    return {
+        "contract_id": "contract-shopping",
+        "domain": "shopping",
+        "primary_objective": "Build the correct cart.",
+        "objective_priority": ["requirements", "budget"],
+        "hard_rules": [{"id": "rule-1", "text": "Stay within budget."}],
+        "state_authority_rules": [
+            {"state": "cart", "tool": "get_cart_info", "authoritative": True}
+        ],
+        "level_policy": {
+            "budget_priority": "primary",
+            "coupon_reasoning_required": True,
+            "allow_over_budget_explanation": False,
+        },
+        "tool_semantics": {
+            "mutating_tools": [
+                "add_product_to_cart",
+                "delete_product_from_cart",
+                "add_coupon_to_cart",
+                "delete_coupon_from_cart",
+            ],
+            "read_only_tools": ["get_cart_info", "search_products"],
+            "search_tools": ["search_products"],
+            "verification_tools": ["get_cart_info"],
+        },
+        "final_output_requirements": ["Use the authoritative cart state."],
+    }
+
+
+def _shopping_checklist_payload(
+    *,
+    coverage_targets: list[dict[str, object]] | None = None,
+    items: list[dict[str, object]] | None = None,
+    final_verification_only_keys: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "checklist_id": "checklist-1",
+        "items": items
+        or [
+            {
+                "key": "final:fresh-cart",
+                "category": "final_requirement",
+                "description": "Fresh cart read",
+                "value": None,
+                "required": True,
+                "explicit": False,
+                "coverage_relevant": False,
+                "final_verify_only": True,
+                "aliases": [],
+                "source_text": None,
+            }
+        ],
+        "coverage_targets": coverage_targets or [],
+        "final_verification_only_keys": final_verification_only_keys
+        or ["final:fresh-cart"],
+        "ambiguities": [],
+    }
+
+
 def _fake_completion_factory(
     responses: list[FakeResponse],
     captured_calls: list[dict[str, object]] | None = None,
@@ -132,6 +207,37 @@ def _fake_completion_factory(
         return queue.pop(0)
 
     return _fake_call
+
+
+def _install_c2_lite_mocks(
+    monkeypatch,
+    *,
+    executor_responses: list[FakeResponse],
+    compiler_responses: list[FakeResponse] | None = None,
+    overseer_responses: list[FakeResponse] | None = None,
+    captured_executor_calls: list[dict[str, object]] | None = None,
+) -> None:
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(executor_responses, captured_executor_calls),
+    )
+    monkeypatch.setattr(
+        oversight_contracts,
+        "call_chat_completion",
+        _fake_completion_factory(
+            compiler_responses
+            or [
+                _fake_json_response(_shopping_contract_payload()),
+                _fake_json_response(_shopping_checklist_payload()),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        oversight_module,
+        "call_chat_completion",
+        _fake_completion_factory(overseer_responses or []),
+    )
 
 
 def _load_jsonl(path: Path) -> list[dict[str, object]]:
@@ -467,6 +573,1052 @@ def test_shopping_runner_gives_phase_two_a_fresh_budget_and_omits_tool_name(
         and "name" not in message
         for message in result.messages
     )
+
+
+def test_system_a_behavior_unchanged_when_oversight_disabled(monkeypatch, tmp_path):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(
+                    content="Phase one complete.",
+                    prompt_tokens=10,
+                    completion_tokens=4,
+                ),
+                FakeResponse(
+                    content="Cart verified.",
+                    prompt_tokens=11,
+                    completion_tokens=5,
+                ),
+            ],
+            captured_calls,
+        ),
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen-plus",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="A",
+    )
+    logger = StructuredLogger(tmp_path / "shopping_logs")
+    system_config = build_system_config("A", executor_model="qwen-plus", max_steps=2)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="test shopping query",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            logger=logger,
+            sample_id="1",
+        )
+    )
+
+    assert result.output == "Cart verified."
+    assert state.executor_calls == 2
+    assert state.final_stop_reason == "no_tool_calls"
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and "Check whether the items in the shopping cart meet the requirements."
+        in message.get("content", "")
+        for message in captured_calls[1]["messages"]
+    )
+    records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
+    assert [record["event_type"] for record in records] == [
+        "executor_turn",
+        "executor_turn",
+    ]
+    assert not any(record["event_type"] == "oversight_step" for record in records)
+
+
+def test_shopping_runner_saves_debug_messages_outside_agent_dir_without_sample_id(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(
+                    content="Phase one complete.",
+                    prompt_tokens=10,
+                    completion_tokens=4,
+                ),
+                FakeResponse(
+                    content="Cart verified.",
+                    prompt_tokens=11,
+                    completion_tokens=5,
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "DEBUG_MESSAGES_ROOT",
+        tmp_path / "debug_messages" / "shopping",
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen-plus",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="debug-run",
+        domain="shopping",
+        complexity=1,
+        system_config_name="A",
+    )
+    system_config = build_system_config("A", executor_model="qwen-plus", max_steps=2)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="test shopping query",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            save_messages=True,
+            sample_id=None,
+        )
+    )
+
+    assert result.output == "Cart verified."
+    debug_messages = sorted(
+        (tmp_path / "debug_messages" / "shopping").glob("messages_*.json")
+    )
+    assert len(debug_messages) == 1
+    assert REPO_ROOT / "agent" not in debug_messages[0].resolve().parents
+
+
+def test_pre_tool_blocked_mutation_does_not_persist_rejected_tool_call_message(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(
+                        "call_1",
+                        "add_product_to_cart",
+                        '{"product_id":"1"}',
+                    )
+                ],
+                prompt_tokens=10,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Phase one complete.",
+                prompt_tokens=11,
+                completion_tokens=5,
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=12,
+                completion_tokens=6,
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "provide_guidance",
+                    "decision_summary": "Read the cart before mutating it.",
+                    "block_current_tool": True,
+                    "guidance_lines": ["Call get_cart_info before mutating the cart."],
+                    "corrected_observation": None,
+                    "violated_contract_ids": ["rule-1"],
+                    "unmet_checklist_keys": ["final:fresh-cart"],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Final answer approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_calls,
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    logger = StructuredLogger(tmp_path / "shopping_logs")
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=3)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            logger=logger,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    assert result.output == "Final cart answer."
+    assert state.blocked_mutation_count == 1
+    assert not any(
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("tool_calls")
+        for message in result.messages
+    )
+    follow_up_messages = captured_calls[1]["messages"]
+    assert follow_up_messages[-1]["role"] == "user"
+    assert (
+        "Call get_cart_info before mutating the cart."
+        in follow_up_messages[-1]["content"]
+    )
+    records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
+    oversight_steps = [
+        record
+        for record in records
+        if record["event_type"] == "oversight_step"
+        and record.get("trigger_type") == "mutating_action"
+    ]
+    assert oversight_steps[0]["parsed_payload"]["action"] == "provide_guidance"
+    assert oversight_steps[0]["raw_overseer_text"] is not None
+    assert oversight_steps[0]["notice_rendered"] is True
+    assert any(
+        record["event_type"] == "oversight_notice_injected"
+        and record.get("notice_role") == "user"
+        and "Call get_cart_info before mutating the cart." in record["notice_text"]
+        for record in records
+    )
+
+
+def test_pre_tool_empty_guidance_uses_local_fallback_and_clears_notice_after_injection(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(
+                        "call_1",
+                        "add_product_to_cart",
+                        '{"product_id":"1"}',
+                    )
+                ],
+                prompt_tokens=10,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Phase one complete.",
+                prompt_tokens=11,
+                completion_tokens=5,
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=12,
+                completion_tokens=6,
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "provide_guidance",
+                    "decision_summary": "Blocked pending correction.",
+                    "block_current_tool": True,
+                    "guidance_lines": [],
+                    "corrected_observation": None,
+                    "violated_contract_ids": ["rule-1"],
+                    "unmet_checklist_keys": ["product:footwear"],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Final answer approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_calls,
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=3)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="build a footwear collection",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    follow_up_messages = captured_calls[1]["messages"]
+    assert follow_up_messages[-1]["role"] == "user"
+    assert (
+        "Re-check task requirement: product footwear."
+        in follow_up_messages[-1]["content"]
+    )
+    assert not any(
+        isinstance(message, dict)
+        and "[OVERSEER NOTICE]" in str(message.get("content", ""))
+        for message in result.messages
+    )
+    assert state.pending_executor_notice is None
+
+
+def test_post_tool_error_occurrence_sets_pending_notice_without_rewriting_history(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(
+                        "call_1",
+                        "search_products",
+                        '{"query":"laptop"}',
+                    )
+                ],
+                prompt_tokens=10,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Phase one complete.",
+                prompt_tokens=11,
+                completion_tokens=5,
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=12,
+                completion_tokens=6,
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "provide_guidance",
+                    "decision_summary": "Tool failed.",
+                    "block_current_tool": False,
+                    "guidance_lines": [
+                        "Retry with a safer search or inspect cart state."
+                    ],
+                    "corrected_observation": None,
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Final answer approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_calls,
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: "FAILED: invalid query",
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=3)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "tool"
+        and message.get("content") == "FAILED: invalid query"
+        for message in result.messages
+    )
+    follow_up_messages = captured_calls[1]["messages"]
+    assert follow_up_messages[-1]["role"] == "user"
+    assert "Retry with a safer search" in follow_up_messages[-1]["content"]
+
+
+def test_repeated_blocked_mutation_terminates_cleanly(monkeypatch, tmp_path):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(
+                        "call_1",
+                        "add_product_to_cart",
+                        '{"product_id":"1"}',
+                    )
+                ],
+                prompt_tokens=10,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(
+                        "call_2",
+                        "add_product_to_cart",
+                        '{"product_id":"1"}',
+                    )
+                ],
+                prompt_tokens=11,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(
+                        "call_3",
+                        "add_product_to_cart",
+                        '{"product_id":"1"}',
+                    )
+                ],
+                prompt_tokens=12,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "provide_guidance",
+                    "decision_summary": "Blocked cart mutation.",
+                    "block_current_tool": True,
+                    "guidance_lines": ["Verify a different candidate before mutating."],
+                    "corrected_observation": None,
+                    "violated_contract_ids": ["rule-1"],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "provide_guidance",
+                    "decision_summary": "Blocked cart mutation again.",
+                    "block_current_tool": True,
+                    "guidance_lines": ["Verify a different candidate before mutating."],
+                    "corrected_observation": None,
+                    "violated_contract_ids": ["rule-1"],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "provide_guidance",
+                    "decision_summary": "Blocked cart mutation again.",
+                    "block_current_tool": True,
+                    "guidance_lines": ["Verify a different candidate before mutating."],
+                    "corrected_observation": None,
+                    "violated_contract_ids": ["rule-1"],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_calls,
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    logger = StructuredLogger(tmp_path / "shopping_logs")
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=5)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            logger=logger,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    assert result.output == ""
+    assert state.final_stop_reason == shopping_module.REPEATED_BLOCK_STOP_REASON
+    assert state.final_output_present is False
+    assert state.max_steps_hit is False
+    assert state.blocked_mutation_count == 3
+    assert len(captured_calls) == 3
+    records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
+    assert any(
+        record["event_type"] == "executor_turn"
+        and record["stop_reason"] == shopping_module.REPEATED_BLOCK_STOP_REASON
+        for record in records
+    )
+
+
+def test_midpoint_coverage_notice_is_consumed_on_first_cart_check_turn(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="Phase one complete.",
+                prompt_tokens=10,
+                completion_tokens=4,
+            ),
+            FakeResponse(
+                content="",
+                tool_calls=[FakeToolCall("call_1", "get_cart_info", "{}")],
+                prompt_tokens=11,
+                completion_tokens=5,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Final cart answer.",
+                prompt_tokens=12,
+                completion_tokens=6,
+            ),
+        ],
+        compiler_responses=[
+            _fake_json_response(_shopping_contract_payload()),
+            _fake_json_response(
+                _shopping_checklist_payload(
+                    coverage_targets=[
+                        {
+                            "key": "product:laptop",
+                            "category": "product",
+                            "aliases": ["laptop"],
+                            "tool_roles": ["search"],
+                        }
+                    ],
+                    items=[
+                        {
+                            "key": "product:laptop",
+                            "category": "required_product",
+                            "description": "laptop",
+                            "value": "laptop",
+                            "required": True,
+                            "explicit": True,
+                            "coverage_relevant": True,
+                            "final_verify_only": False,
+                            "aliases": ["laptop"],
+                            "source_text": "laptop",
+                        }
+                    ],
+                    final_verification_only_keys=[],
+                )
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "provide_guidance",
+                    "decision_summary": "Missing product coverage.",
+                    "block_current_tool": False,
+                    "guidance_lines": ["Inspect laptop options before cart check."],
+                    "corrected_observation": None,
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": ["product:laptop"],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Final answer approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_calls,
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: '{"items":[]}',
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=3)
+
+    asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    first_cart_check_messages = captured_calls[1]["messages"]
+    second_cart_check_messages = captured_calls[2]["messages"]
+    assert first_cart_check_messages[-1]["role"] == "user"
+    assert "Inspect laptop." in first_cart_check_messages[-1]["content"]
+    assert not any(
+        isinstance(message, dict) and "[OVERSEER NOTICE]" in message.get("content", "")
+        for message in second_cart_check_messages[-2:]
+    )
+
+
+def test_final_checkpoint_blocks_commit_until_approved(monkeypatch, tmp_path):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="Phase one complete.", prompt_tokens=10, completion_tokens=4
+            ),
+            FakeResponse(
+                content="Draft final answer.", prompt_tokens=11, completion_tokens=5
+            ),
+            FakeResponse(
+                content="Approved final answer.", prompt_tokens=12, completion_tokens=6
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "run_verification",
+                    "pass": False,
+                    "decision_summary": "Need a fresh verification step.",
+                    "blockers": [
+                        {"type": "missing_item", "detail": "Need cart verification"}
+                    ],
+                    "next_step_notice_lines": ["Call get_cart_info before finalizing."],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": ["final:fresh-cart"],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_calls,
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=3)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    assert result.output == "Approved final answer."
+    assert not any(
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("content") == "Draft final answer."
+        for message in result.messages
+    )
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("content") == "Approved final answer."
+        for message in result.messages
+    )
+    assert captured_calls[2]["messages"][-1]["role"] == "user"
+    assert (
+        "Call get_cart_info before finalizing."
+        in captured_calls[2]["messages"][-1]["content"]
+    )
+
+
+def test_final_checkpoint_stale_cart_precheck_forces_get_cart_info_first(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="Phase one complete.", prompt_tokens=10, completion_tokens=4
+            ),
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall("call_1", "add_product_to_cart", '{"product_id":"1"}')
+                ],
+                prompt_tokens=11,
+                completion_tokens=5,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Draft final answer.", prompt_tokens=12, completion_tokens=6
+            ),
+            FakeResponse(
+                content="",
+                tool_calls=[FakeToolCall("call_2", "get_cart_info", "{}")],
+                prompt_tokens=13,
+                completion_tokens=5,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Approved final answer.", prompt_tokens=14, completion_tokens=6
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "decision_summary": "Mutation approved.",
+                    "block_current_tool": False,
+                    "guidance_lines": [],
+                    "corrected_observation": None,
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_calls,
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: (
+            '{"success": true}' if name == "add_product_to_cart" else '{"items":[]}'
+        ),
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=5)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    assert result.output == "Approved final answer."
+    assert captured_calls[3]["messages"][-1]["role"] == "user"
+    assert (
+        "Call get_cart_info before finalizing. The cart state is the source of truth."
+        in captured_calls[3]["messages"][-1]["content"]
+    )
+
+
+def test_final_checkpoint_retry_cap_exhaustion_returns_empty_final_output(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="Phase one complete.", prompt_tokens=10, completion_tokens=4
+            ),
+            FakeResponse(content="Draft 1", prompt_tokens=11, completion_tokens=5),
+            FakeResponse(content="Draft 2", prompt_tokens=12, completion_tokens=5),
+            FakeResponse(content="Draft 3", prompt_tokens=13, completion_tokens=5),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "run_verification",
+                    "pass": False,
+                    "decision_summary": "Need more verification.",
+                    "blockers": [
+                        {"type": "missing_item", "detail": "Need cart verification"}
+                    ],
+                    "next_step_notice_lines": ["Call get_cart_info before finalizing."],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": ["final:fresh-cart"],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "run_verification",
+                    "pass": False,
+                    "decision_summary": "Still not verified.",
+                    "blockers": [
+                        {"type": "missing_item", "detail": "Need cart verification"}
+                    ],
+                    "next_step_notice_lines": ["Call get_cart_info before finalizing."],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": ["final:fresh-cart"],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "run_verification",
+                    "pass": False,
+                    "decision_summary": "Retry cap reached.",
+                    "blockers": [
+                        {"type": "missing_item", "detail": "Need cart verification"}
+                    ],
+                    "next_step_notice_lines": ["Call get_cart_info before finalizing."],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": ["final:fresh-cart"],
+                }
+            ),
+        ],
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=4)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+        )
+    )
+
+    assert result.output == ""
+    assert state.final_verification_result == "retry_cap_exhausted"
+
+
+def test_shopping_run_agent_inference_still_writes_logs_under_output_dir(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+    output_dir = tmp_path / "shopping_logs"
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text(
+        json.dumps([{"id": 1, "query": "test shopping query", "level": 1}]),
+        encoding="utf-8",
+    )
+
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="Phase one complete.", prompt_tokens=10, completion_tokens=4
+            ),
+            FakeResponse(
+                content="Cart verified.", prompt_tokens=11, completion_tokens=5
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            )
+        ],
+    )
+
+    results = shopping_module.run_agent_inference(
+        model="qwen3.5-9b",
+        test_data_path=test_data_path,
+        database_dir=run_database_dir,
+        tool_schema_path=SHOPPING_SCHEMA_PATH,
+        system_prompt=shopping_module.get_system_prompt(1),
+        output_dir=output_dir,
+        workers=1,
+        max_llm_calls=2,
+        system="C2",
+        shared_oversight_cache_root=tmp_path / "cache",
+    )
+
+    assert results["success"] == 1
+    assert (output_dir / "agent_events.jsonl").exists()
+    assert (output_dir / "task_results.jsonl").exists()
+    assert not (run_database_dir / "agent_events.jsonl").exists()
 
 
 def test_shopping_run_agent_inference_logs_under_output_dir(monkeypatch, tmp_path):

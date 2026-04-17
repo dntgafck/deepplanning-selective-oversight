@@ -2,3 +2,16 @@ name: C2
 oversight_enabled: true
 oversight_mode: adaptive
 overseer_thinking: true
+overseer_prompt_version: c2-lite-v1.2
+loop_similarity_threshold: 0.92
+loop_window: 5
+loop_repeat_count: 3
+coverage_threshold: 0.50
+final_repair_retry_cap: 2
+recent_tool_window: 5
+inject_transient_notice: true
+mutating_tools:
+  - add_product_to_cart
+  - delete_product_from_cart
+  - add_coupon_to_cart
+  - delete_coupon_from_cart

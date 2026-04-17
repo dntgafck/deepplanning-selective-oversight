@@ -141,6 +141,9 @@ def run(
                 raise FileNotFoundError(
                     f"Shopping data missing at {source_database_dir}. Ensure DVC data bootstrap is present under data/deepplanning/."
                 )
+            shared_oversight_cache_root = ensure_directory(
+                model_output_root / "_oversight_cache" / f"level_{level}"
+            )
 
             timestamp = time.strftime("%Y%m%d%H%M")
             output_name = f"database_{model}_level{level}_{timestamp}"
@@ -201,6 +204,7 @@ def run(
                 system=str(system),
                 database_dir_by_run=run_database_dirs,
                 output_dir_by_run=run_output_dirs,
+                shared_oversight_cache_root=shared_oversight_cache_root,
                 session_id=langfuse_session_id,
             )
             print(

@@ -1,0 +1,689 @@
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from dataclasses import asdict, dataclass
+from hashlib import sha256
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from llm import call_chat_completion
+
+if TYPE_CHECKING:
+    from experiment import SystemConfig
+
+P0_SYSTEM_PROMPT = """You convert an executor's task instructions and tool schema into a compact execution contract for selective oversight.
+
+Output valid JSON only.
+Do not solve tasks.
+Do not rewrite the task instructions.
+Extract only policy-relevant structure needed for runtime monitoring and verification.
+
+Required behavior:
+- Identify the primary objective and objective priority.
+- Extract explicit hard rules.
+- Identify what state is authoritative and which tool reads it.
+- Classify tools into mutating, read-only, search, and verification roles.
+- Capture any level-specific policy differences such as budget priority or coupon logic.
+- Keep the contract concise and normalized."""
+
+P1_SYSTEM_PROMPT = """You convert a task query into an instance-specific checklist under the provided execution contract.
+
+Output valid JSON only.
+Do not solve the task.
+Do not invent preferences or constraints.
+If information is ambiguous, record the ambiguity.
+Separate coverage targets from final verification constraints.
+
+Required fidelity rules:
+- Preserve explicit product-type or category constraints in machine-usable form.
+- Preserve named item requirements, review or quality constraints, and shipping constraints.
+- If the task implies a shared product class such as footwear, keep that constraint attached to the affected required-product items.
+- Coverage targets must be keyed to the corresponding checklist item keys rather than synthetic placeholder keys."""
+
+CHECKLIST_NORMALIZER_VERSION = "shopping-hardening-v1"
+
+
+@dataclass(slots=True)
+class ExecutionContract:
+    contract_id: str
+    domain: str
+    primary_objective: str
+    objective_priority: list[str]
+    hard_rules: list[dict[str, Any]]
+    state_authority_rules: list[dict[str, Any]]
+    level_policy: dict[str, Any]
+    tool_semantics: dict[str, list[str]]
+    final_output_requirements: list[str]
+    compiler_signature: str
+
+
+@dataclass(slots=True)
+class CoverageTarget:
+    key: str
+    category: str
+    aliases: list[str]
+    tool_roles: list[str]
+
+
+@dataclass(slots=True)
+class TaskChecklist:
+    checklist_id: str
+    items: list[dict[str, Any]]
+    coverage_targets: list[CoverageTarget]
+    final_verification_only_keys: list[str]
+    ambiguities: list[str]
+    compiler_signature: str
+
+
+PRODUCT_TYPE_HINTS: tuple[tuple[str, str], ...] = (
+    ("trail shoe", "trail shoe"),
+    ("trail shoes", "trail shoes"),
+    ("running shoe", "running shoe"),
+    ("running shoes", "running shoes"),
+    ("sneaker", "sneakers"),
+    ("sneakers", "sneakers"),
+    ("shoe", "shoes"),
+    ("shoes", "shoes"),
+    ("footwear", "footwear"),
+    ("boot", "boots"),
+    ("boots", "boots"),
+    ("sandal", "sandals"),
+    ("sandals", "sandals"),
+)
+
+
+def execution_contract_to_dict(contract: ExecutionContract) -> dict[str, Any]:
+    return asdict(contract)
+
+
+def task_checklist_to_dict(checklist: TaskChecklist) -> dict[str, Any]:
+    return asdict(checklist)
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value).strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
+
+
+def _stringify_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value)
+
+
+def _infer_product_types(*, task_query: str, item: dict[str, Any]) -> list[str]:
+    category = str(item.get("category") or "")
+    if category != "required_product":
+        return []
+
+    value = item.get("value")
+    combined_text = " ".join(
+        part
+        for part in (
+            task_query,
+            str(item.get("description") or ""),
+            str(item.get("source_text") or ""),
+            _stringify_value(value),
+        )
+        if part
+    ).lower()
+
+    product_types: list[str] = []
+    for needle, label in PRODUCT_TYPE_HINTS:
+        if needle in combined_text:
+            product_types.append(label)
+    if "footwear collection" in task_query.lower() and "footwear" not in product_types:
+        product_types.insert(0, "footwear")
+    return _dedupe_strings(product_types)
+
+
+def _normalize_checklist_item(
+    *,
+    item: dict[str, Any],
+    task_query: str,
+) -> dict[str, Any]:
+    normalized = dict(item)
+    original_value = normalized.get("value")
+    value = (
+        dict(original_value)
+        if isinstance(original_value, dict)
+        else ({} if original_value is None else {"raw_value": original_value})
+    )
+    aliases = _dedupe_strings([str(alias) for alias in normalized.get("aliases", [])])
+    product_types = _infer_product_types(task_query=task_query, item=normalized)
+
+    if product_types:
+        value.setdefault("product_type", product_types[0])
+        existing_type_aliases = [
+            str(alias) for alias in value.get("product_type_aliases", [])
+        ]
+        value["product_type_aliases"] = _dedupe_strings(
+            existing_type_aliases + product_types
+        )
+        aliases = _dedupe_strings(
+            aliases
+            + product_types
+            + [str(value.get("name") or ""), str(normalized.get("description") or "")]
+        )
+
+    normalized["aliases"] = aliases
+    if isinstance(original_value, dict) or value:
+        normalized["value"] = value
+    return normalized
+
+
+def _coverage_category(item: dict[str, Any]) -> str:
+    category = str(item.get("category") or "")
+    return {
+        "required_product": "product",
+        "product_attribute": "attribute",
+        "budget": "budget",
+        "shipping": "shipping",
+        "coupon": "coupon",
+    }.get(category, "product")
+
+
+def _coverage_tool_roles(item: dict[str, Any]) -> list[str]:
+    category = str(item.get("category") or "")
+    value = item.get("value")
+    text = " ".join(
+        part
+        for part in (
+            str(item.get("description") or ""),
+            str(item.get("source_text") or ""),
+            _stringify_value(value),
+        )
+        if part
+    ).lower()
+    roles: list[str] = []
+    if category == "coupon":
+        roles.append("coupon")
+    elif category == "shipping":
+        roles.append("shipping")
+    else:
+        roles.extend(["search", "details"])
+        if "transport time" in text or "arrive" in text or "shipping" in text:
+            roles.append("shipping")
+    return _dedupe_strings(roles)
+
+
+def _coverage_aliases(item: dict[str, Any]) -> list[str]:
+    value = item.get("value")
+    payload = dict(value) if isinstance(value, dict) else {}
+    aliases = [str(alias) for alias in item.get("aliases", [])]
+    aliases.extend(
+        [
+            str(payload.get("name") or ""),
+            str(payload.get("brand") or ""),
+            str(payload.get("color") or ""),
+            str(payload.get("product_type") or ""),
+            str(item.get("description") or ""),
+        ]
+    )
+    aliases.extend(str(alias) for alias in payload.get("product_type_aliases", []))
+    return _dedupe_strings(aliases)
+
+
+def normalize_task_checklist(
+    checklist: TaskChecklist,
+    *,
+    task_query: str,
+) -> TaskChecklist:
+    normalized_items = [
+        _normalize_checklist_item(item=item, task_query=task_query)
+        for item in checklist.items
+    ]
+    items_by_key = {
+        str(item.get("key") or ""): item
+        for item in normalized_items
+        if str(item.get("key") or "")
+    }
+    if not checklist.coverage_targets or any(
+        target.key not in items_by_key for target in checklist.coverage_targets
+    ):
+        coverage_targets = [
+            CoverageTarget(
+                key=str(item["key"]),
+                category=_coverage_category(item),
+                aliases=_coverage_aliases(item),
+                tool_roles=_coverage_tool_roles(item),
+            )
+            for item in normalized_items
+            if item.get("coverage_relevant")
+            and not item.get("final_verify_only")
+            and str(item.get("key") or "")
+        ]
+    else:
+        coverage_targets = []
+        for target in checklist.coverage_targets:
+            item = items_by_key.get(target.key)
+            merged_aliases = list(target.aliases)
+            merged_roles = list(target.tool_roles)
+            if item is not None:
+                merged_aliases = _dedupe_strings(
+                    merged_aliases + _coverage_aliases(item)
+                )
+                merged_roles = _dedupe_strings(
+                    merged_roles + _coverage_tool_roles(item)
+                )
+            coverage_targets.append(
+                CoverageTarget(
+                    key=target.key,
+                    category=target.category or _coverage_category(item or {}),
+                    aliases=merged_aliases,
+                    tool_roles=merged_roles,
+                )
+            )
+
+    return TaskChecklist(
+        checklist_id=checklist.checklist_id,
+        items=normalized_items,
+        coverage_targets=coverage_targets,
+        final_verification_only_keys=list(checklist.final_verification_only_keys),
+        ambiguities=list(checklist.ambiguities),
+        compiler_signature=checklist.compiler_signature,
+    )
+
+
+def parse_execution_contract_json(payload: str | dict[str, Any]) -> ExecutionContract:
+    data = json.loads(payload) if isinstance(payload, str) else payload
+    if not isinstance(data, dict):
+        raise ValueError("Execution contract payload must be a JSON object")
+    return ExecutionContract(
+        contract_id=str(data["contract_id"]),
+        domain=str(data["domain"]),
+        primary_objective=str(data["primary_objective"]),
+        objective_priority=[str(item) for item in data.get("objective_priority", [])],
+        hard_rules=[dict(item) for item in data.get("hard_rules", [])],
+        state_authority_rules=[
+            dict(item) for item in data.get("state_authority_rules", [])
+        ],
+        level_policy=dict(data.get("level_policy", {})),
+        tool_semantics={
+            str(key): [str(item) for item in value]
+            for key, value in dict(data.get("tool_semantics", {})).items()
+        },
+        final_output_requirements=[
+            str(item) for item in data.get("final_output_requirements", [])
+        ],
+        compiler_signature=str(data["compiler_signature"]),
+    )
+
+
+def parse_task_checklist_json(
+    payload: str | dict[str, Any],
+    *,
+    task_query: str | None = None,
+) -> TaskChecklist:
+    data = json.loads(payload) if isinstance(payload, str) else payload
+    if not isinstance(data, dict):
+        raise ValueError("Task checklist payload must be a JSON object")
+    checklist = TaskChecklist(
+        checklist_id=str(data["checklist_id"]),
+        items=[dict(item) for item in data.get("items", [])],
+        coverage_targets=[
+            CoverageTarget(
+                key=str(item["key"]),
+                category=str(item["category"]),
+                aliases=[str(alias) for alias in item.get("aliases", [])],
+                tool_roles=[str(role) for role in item.get("tool_roles", [])],
+            )
+            for item in data.get("coverage_targets", [])
+        ],
+        final_verification_only_keys=[
+            str(item) for item in data.get("final_verification_only_keys", [])
+        ],
+        ambiguities=[str(item) for item in data.get("ambiguities", [])],
+        compiler_signature=str(data["compiler_signature"]),
+    )
+    if task_query is not None:
+        return normalize_task_checklist(checklist, task_query=task_query)
+    return checklist
+
+
+def make_contract_cache_key(
+    *,
+    domain: str,
+    executor_system_prompt: str,
+    tool_schema: Any,
+    compiler_signature: str,
+) -> str:
+    payload = {
+        "domain": domain,
+        "executor_system_prompt": executor_system_prompt,
+        "tool_schema": tool_schema,
+        "compiler_signature": compiler_signature,
+    }
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def make_checklist_cache_key(
+    *,
+    task_id: str,
+    task_query: str,
+    contract_id: str,
+    compiler_signature: str,
+) -> str:
+    payload = {
+        "task_id": task_id,
+        "task_query": task_query,
+        "contract_id": contract_id,
+        "compiler_signature": compiler_signature,
+    }
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _compiler_signature(system_config: SystemConfig) -> str:
+    model_alias = (
+        system_config.overseer_provider.alias
+        if system_config.overseer_provider is not None
+        else "disabled"
+    )
+    thinking_mode = "thinking" if system_config.overseer_thinking else "non-thinking"
+    return (
+        f"overseer={model_alias}|mode={thinking_mode}|"
+        f"prompt={system_config.overseer_prompt_version}|"
+        f"checklist={CHECKLIST_NORMALIZER_VERSION}"
+    )
+
+
+def _strict_json_content(response: Any) -> dict[str, Any]:
+    message = response.choices[0].message
+    content = str(getattr(message, "content", "") or "").strip()
+    if not content:
+        raise ValueError("Overseer returned empty JSON content")
+    payload = json.loads(content)
+    if not isinstance(payload, dict):
+        raise ValueError("Overseer JSON payload must be an object")
+    return payload
+
+
+def _cache_path(cache_root: Path, subdir: str, cache_key: str) -> Path:
+    directory = cache_root / subdir
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{cache_key}.json"
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temp_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if path.exists():
+        temp_path.unlink(missing_ok=True)
+        return False
+    os.replace(temp_path, path)
+    return True
+
+
+async def _compile_execution_contract(
+    *,
+    domain: str,
+    executor_system_prompt: str,
+    tool_schema: Any,
+    system_config: SystemConfig,
+) -> ExecutionContract:
+    if system_config.overseer_provider is None:
+        raise ValueError("Adaptive oversight requires an overseer provider")
+
+    compiler_signature = _compiler_signature(system_config)
+    response = await call_chat_completion(
+        provider=system_config.overseer_provider,
+        messages=[
+            {"role": "system", "content": P0_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "domain": domain,
+                        "executor_system_prompt": executor_system_prompt,
+                        "tool_schema": tool_schema,
+                        "response_schema": {
+                            "contract_id": "string",
+                            "domain": "shopping",
+                            "primary_objective": "string",
+                            "objective_priority": ["string"],
+                            "hard_rules": [{"id": "string", "text": "string"}],
+                            "state_authority_rules": [
+                                {
+                                    "state": "cart",
+                                    "tool": "get_cart_info",
+                                    "authoritative": True,
+                                }
+                            ],
+                            "level_policy": {
+                                "budget_priority": "primary|secondary|none",
+                                "coupon_reasoning_required": True,
+                                "allow_over_budget_explanation": False,
+                            },
+                            "tool_semantics": {
+                                "mutating_tools": ["string"],
+                                "read_only_tools": ["string"],
+                                "search_tools": ["string"],
+                                "verification_tools": ["string"],
+                            },
+                            "final_output_requirements": ["string"],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        reasoning_enabled=system_config.overseer_thinking,
+        validate_nonempty=True,
+    )
+    payload = _strict_json_content(response)
+    payload["compiler_signature"] = compiler_signature
+    return parse_execution_contract_json(payload)
+
+
+async def _compile_task_checklist(
+    *,
+    task_id: str,
+    task_query: str,
+    execution_contract: ExecutionContract,
+    system_config: SystemConfig,
+) -> TaskChecklist:
+    if system_config.overseer_provider is None:
+        raise ValueError("Adaptive oversight requires an overseer provider")
+
+    response = await call_chat_completion(
+        provider=system_config.overseer_provider,
+        messages=[
+            {"role": "system", "content": P1_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "execution_contract": execution_contract_to_dict(
+                            execution_contract
+                        ),
+                        "task_query": task_query,
+                        "response_schema": {
+                            "checklist_id": "string",
+                            "items": [
+                                {
+                                    "key": "string",
+                                    "category": "required_product|product_attribute|budget|shipping|coupon|ambiguity|final_requirement",
+                                    "description": "string",
+                                    "value": {
+                                        "product_type": "string|null",
+                                        "name": "string|null",
+                                        "brand": "string|null",
+                                        "color": "string|null",
+                                        "review_criteria": "object|null",
+                                        "shipping_constraints": "object|null",
+                                        "other_constraints": "object|null",
+                                    },
+                                    "required": True,
+                                    "explicit": True,
+                                    "coverage_relevant": True,
+                                    "final_verify_only": False,
+                                    "aliases": ["string"],
+                                    "source_text": "string|null",
+                                }
+                            ],
+                            "coverage_targets": [
+                                {
+                                    "key": "string",
+                                    "category": "product|attribute|budget|shipping|coupon",
+                                    "aliases": ["string"],
+                                    "tool_roles": [
+                                        "search|details|shipping|coupon|user_info"
+                                    ],
+                                }
+                            ],
+                            "final_verification_only_keys": ["string"],
+                            "ambiguities": ["string"],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        reasoning_enabled=system_config.overseer_thinking,
+        validate_nonempty=True,
+    )
+    payload = _strict_json_content(response)
+    payload["compiler_signature"] = execution_contract.compiler_signature
+    return parse_task_checklist_json(payload, task_query=task_query)
+
+
+async def load_or_build_execution_contract_with_metadata(
+    *,
+    domain: str,
+    executor_system_prompt: str,
+    tool_schema: Any,
+    system_config: SystemConfig,
+    cache_root: Path,
+) -> tuple[ExecutionContract, str, str]:
+    compiler_signature = _compiler_signature(system_config)
+    cache_key = make_contract_cache_key(
+        domain=domain,
+        executor_system_prompt=executor_system_prompt,
+        tool_schema=tool_schema,
+        compiler_signature=compiler_signature,
+    )
+    path = _cache_path(cache_root, "contracts", cache_key)
+    if path.exists():
+        return (
+            parse_execution_contract_json(path.read_text(encoding="utf-8")),
+            cache_key,
+            "hit",
+        )
+
+    contract = await _compile_execution_contract(
+        domain=domain,
+        executor_system_prompt=executor_system_prompt,
+        tool_schema=tool_schema,
+        system_config=system_config,
+    )
+    wrote_file = _write_json_atomic(path, execution_contract_to_dict(contract))
+    status = "built" if wrote_file else "hit"
+    return (
+        parse_execution_contract_json(path.read_text(encoding="utf-8")),
+        cache_key,
+        status,
+    )
+
+
+async def load_or_build_task_checklist_with_metadata(
+    *,
+    task_id: str,
+    task_query: str,
+    execution_contract: ExecutionContract,
+    system_config: SystemConfig,
+    cache_root: Path,
+) -> tuple[TaskChecklist, str, str]:
+    cache_key = make_checklist_cache_key(
+        task_id=task_id,
+        task_query=task_query,
+        contract_id=execution_contract.contract_id,
+        compiler_signature=execution_contract.compiler_signature,
+    )
+    path = _cache_path(cache_root, "checklists", cache_key)
+    if path.exists():
+        return (
+            parse_task_checklist_json(
+                path.read_text(encoding="utf-8"),
+                task_query=task_query,
+            ),
+            cache_key,
+            "hit",
+        )
+
+    checklist = await _compile_task_checklist(
+        task_id=task_id,
+        task_query=task_query,
+        execution_contract=execution_contract,
+        system_config=system_config,
+    )
+    wrote_file = _write_json_atomic(path, task_checklist_to_dict(checklist))
+    status = "built" if wrote_file else "hit"
+    return (
+        parse_task_checklist_json(
+            path.read_text(encoding="utf-8"),
+            task_query=task_query,
+        ),
+        cache_key,
+        status,
+    )
+
+
+async def load_or_build_execution_contract(
+    *,
+    domain: str,
+    executor_system_prompt: str,
+    tool_schema: Any,
+    system_config: SystemConfig,
+    cache_root: Path,
+) -> ExecutionContract:
+    contract, _, _ = await load_or_build_execution_contract_with_metadata(
+        domain=domain,
+        executor_system_prompt=executor_system_prompt,
+        tool_schema=tool_schema,
+        system_config=system_config,
+        cache_root=cache_root,
+    )
+    return contract
+
+
+async def load_or_build_task_checklist(
+    *,
+    task_id: str,
+    task_query: str,
+    execution_contract: ExecutionContract,
+    system_config: SystemConfig,
+    cache_root: Path,
+) -> TaskChecklist:
+    checklist, _, _ = await load_or_build_task_checklist_with_metadata(
+        task_id=task_id,
+        task_query=task_query,
+        execution_contract=execution_contract,
+        system_config=system_config,
+        cache_root=cache_root,
+    )
+    return checklist

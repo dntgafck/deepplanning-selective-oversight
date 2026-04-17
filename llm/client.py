@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import inspect
 import os
 import re
@@ -37,13 +38,16 @@ def _langfuse_enabled() -> bool:
 def _merge_reasoning(
     extra_body: dict[str, Any], reasoning_enabled: bool | None
 ) -> dict[str, Any]:
-    merged = dict(extra_body)
+    merged = copy.deepcopy(extra_body)
     if reasoning_enabled is None:
         return merged
 
     reasoning = dict(merged.get("reasoning") or {})
     reasoning["enabled"] = reasoning_enabled
     merged["reasoning"] = reasoning
+    chat_template_kwargs = dict(merged.get("chat_template_kwargs") or {})
+    chat_template_kwargs["thinking"] = reasoning_enabled
+    merged["chat_template_kwargs"] = chat_template_kwargs
     return merged
 
 
@@ -59,6 +63,8 @@ class ProviderConfig:
     top_logprobs: int | None = None
     max_retries: int = 1
     backoff: float = 1.0
+    input_cost_per_million_usd: float | None = None
+    output_cost_per_million_usd: float | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -75,6 +81,16 @@ class ProviderConfig:
             top_logprobs=config.get("top_logprobs"),
             max_retries=max(int(config.get("max_retries", 1)), 1),
             backoff=float(config.get("backoff", 1.0)),
+            input_cost_per_million_usd=(
+                float(config["input_cost_per_million_usd"])
+                if config.get("input_cost_per_million_usd") is not None
+                else None
+            ),
+            output_cost_per_million_usd=(
+                float(config["output_cost_per_million_usd"])
+                if config.get("output_cost_per_million_usd") is not None
+                else None
+            ),
             extra_body=dict(config.get("extra_body") or {}),
         )
 
@@ -87,6 +103,19 @@ def extract_usage_tokens(response: Any) -> tuple[int, int]:
     prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
     completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
     return prompt_tokens, completion_tokens
+
+
+def estimate_call_cost(*, response: Any, provider: ProviderConfig) -> float | None:
+    if (
+        provider.input_cost_per_million_usd is None
+        or provider.output_cost_per_million_usd is None
+    ):
+        return None
+
+    prompt_tokens, completion_tokens = extract_usage_tokens(response)
+    return (prompt_tokens / 1_000_000) * provider.input_cost_per_million_usd + (
+        completion_tokens / 1_000_000
+    ) * provider.output_cost_per_million_usd
 
 
 def _validate_response(response: Any) -> None:

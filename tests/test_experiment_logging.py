@@ -33,6 +33,7 @@ def test_serialize_response_preserves_model_dump_payload():
     payload = serialize_response(FakeDumpResponse())
 
     assert payload["choices"][0]["logprobs"]["content"][0]["token"] == "Hello"
-    assert payload["choices"][0]["logprobs"]["content"][0]["top_logprobs"][1][
-        "token"
-    ] == "Hi"
+    assert (
+        payload["choices"][0]["logprobs"]["content"][0]["top_logprobs"][1]["token"]
+        == "Hi"
+    )
