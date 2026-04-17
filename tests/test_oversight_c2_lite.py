@@ -618,7 +618,7 @@ def test_runtime_overseer_invalid_json_falls_back_to_approve(monkeypatch):
     assert state.overseer_calls == 1
 
 
-def test_checklist_parser_restores_footwear_constraints_from_task_query():
+def test_checklist_parser_does_not_promote_global_framing_to_item_product_type():
     checklist = parse_task_checklist_json(
         {
             "checklist_id": "checklist-1",
@@ -651,10 +651,100 @@ def test_checklist_parser_restores_footwear_constraints_from_task_query():
         task_query="I'm putting together a complete footwear collection and need something from Nike in orange.",
     )
 
-    assert checklist.items[0]["value"]["product_type"] == "footwear"
-    assert "footwear" in checklist.items[0]["aliases"]
+    item = checklist.items[0]
+    assert item["value"].get("product_type") in (None, "")
+    assert "footwear" not in item["value"].get("product_type_hints_soft", [])
+    assert "footwear" not in [alias.lower() for alias in item.get("aliases", [])]
     assert checklist.coverage_targets[0].key == "nike_orange_product"
-    assert "footwear" in checklist.coverage_targets[0].aliases
+    assert "footwear" not in [
+        alias.lower() for alias in checklist.coverage_targets[0].aliases
+    ]
+
+
+def test_infer_product_types_uses_item_local_text_only():
+    from oversight.contracts import _infer_product_types
+
+    hints, evidence = _infer_product_types(
+        task_query="I'm putting together a complete footwear collection.",
+        item={
+            "category": "required_product",
+            "description": "Nike Pro Dri-FIT Long-Sleeve Training Top",
+            "source_text": "A Nike training top.",
+            "value": {"name": "Training Top", "brand": "Nike"},
+        },
+    )
+
+    assert hints == []
+    assert evidence == {}
+
+
+def test_infer_product_types_promotes_hard_only_with_multiple_local_spans():
+    from oversight.contracts import _normalize_checklist_item
+
+    item = {
+        "key": "generic_shoe",
+        "category": "required_product",
+        "description": "Casual weekend shoe",
+        "source_text": "I want something casual.",
+        "value": {"name": "Casual pick"},
+        "aliases": [],
+    }
+
+    normalized, ambiguity_entry = _normalize_checklist_item(
+        item=item,
+        task_query="anything you want",
+    )
+
+    assert normalized["value"].get("product_type") in (None, "")
+    assert "shoes" in normalized["value"].get("product_type_hints_soft", [])
+    assert ambiguity_entry is not None
+    assert "generic_shoe" in ambiguity_entry
+
+
+def test_checklist_invariants_reject_hard_type_without_local_support():
+    from oversight.contracts import (
+        ChecklistInvariantError,
+        _validate_checklist_invariants,
+    )
+
+    bad = TaskChecklist(
+        checklist_id="c-1",
+        items=[
+            {
+                "key": "bad_item",
+                "category": "required_product",
+                "description": "Nike training top",
+                "source_text": "I need a Nike item.",
+                "value": {
+                    "name": "Training Top",
+                    "brand": "Nike",
+                    "product_type": "footwear",
+                    "product_type_aliases": ["footwear"],
+                },
+                "aliases": [],
+            }
+        ],
+        coverage_targets=[
+            CoverageTarget(
+                key="bad_item",
+                category="product",
+                aliases=[],
+                tool_roles=["search"],
+            )
+        ],
+        final_verification_only_keys=[],
+        ambiguities=[],
+        compiler_signature="sig",
+    )
+
+    try:
+        _validate_checklist_invariants(bad)
+    except ChecklistInvariantError as exc:
+        assert "local textual support" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected ChecklistInvariantError for hard type without local support"
+        )
 
 
 def test_cache_keys_differ_between_thinking_and_non_thinking_compilers():

@@ -39,10 +39,10 @@ Separate coverage targets from final verification constraints.
 Required fidelity rules:
 - Preserve explicit product-type or category constraints in machine-usable form.
 - Preserve named item requirements, review or quality constraints, and shipping constraints.
-- If the task implies a shared product class such as footwear, keep that constraint attached to the affected required-product items.
+- Do not promote global task framing (e.g., "footwear collection", "summer outfit", "running gear") into per-item hard constraints. Each item's `value.product_type` must be supported by that item's own description or source span. If an item's product type is unclear or only implied by the overall task theme, leave `value.product_type` null and record the item key in `ambiguities`.
 - Coverage targets must be keyed to the corresponding checklist item keys rather than synthetic placeholder keys."""
 
-CHECKLIST_NORMALIZER_VERSION = "shopping-hardening-v1"
+CHECKLIST_NORMALIZER_VERSION = "shopping-hardening-v2"
 
 
 @dataclass(slots=True)
@@ -77,6 +77,10 @@ class TaskChecklist:
     compiler_signature: str
 
 
+class ChecklistInvariantError(ValueError):
+    """Raised when a normalized checklist violates semantic invariants."""
+
+
 PRODUCT_TYPE_HINTS: tuple[tuple[str, str], ...] = (
     ("trail shoe", "trail shoe"),
     ("trail shoes", "trail shoes"),
@@ -86,7 +90,6 @@ PRODUCT_TYPE_HINTS: tuple[tuple[str, str], ...] = (
     ("sneakers", "sneakers"),
     ("shoe", "shoes"),
     ("shoes", "shoes"),
-    ("footwear", "footwear"),
     ("boot", "boots"),
     ("boots", "boots"),
     ("sandal", "sandals"),
@@ -128,37 +131,48 @@ def _stringify_value(value: Any) -> str:
         return str(value)
 
 
-def _infer_product_types(*, task_query: str, item: dict[str, Any]) -> list[str]:
+def _infer_product_types(
+    *,
+    task_query: str,
+    item: dict[str, Any],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Infer item-local product-type hints and their supporting spans."""
+    del task_query
+
     category = str(item.get("category") or "")
     if category != "required_product":
-        return []
+        return [], {}
 
     value = item.get("value")
-    combined_text = " ".join(
-        part
-        for part in (
-            task_query,
-            str(item.get("description") or ""),
-            str(item.get("source_text") or ""),
-            _stringify_value(value),
-        )
-        if part
-    ).lower()
+    value_name = ""
+    if isinstance(value, dict):
+        value_name = str(value.get("name") or "")
 
-    product_types: list[str] = []
+    sources: dict[str, str] = {
+        "description": str(item.get("description") or "").lower(),
+        "source_text": str(item.get("source_text") or "").lower(),
+        "value_name": value_name.lower(),
+    }
+
+    evidence_by_hint: dict[str, list[str]] = {}
     for needle, label in PRODUCT_TYPE_HINTS:
-        if needle in combined_text:
-            product_types.append(label)
-    if "footwear collection" in task_query.lower() and "footwear" not in product_types:
-        product_types.insert(0, "footwear")
-    return _dedupe_strings(product_types)
+        for span_name, text in sources.items():
+            if not text:
+                continue
+            if needle in text:
+                evidence_by_hint.setdefault(label, [])
+                if span_name not in evidence_by_hint[label]:
+                    evidence_by_hint[label].append(span_name)
+
+    hints = _dedupe_strings(list(evidence_by_hint.keys()))
+    return hints, evidence_by_hint
 
 
 def _normalize_checklist_item(
     *,
     item: dict[str, Any],
     task_query: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str | None]:
     normalized = dict(item)
     original_value = normalized.get("value")
     value = (
@@ -167,26 +181,55 @@ def _normalize_checklist_item(
         else ({} if original_value is None else {"raw_value": original_value})
     )
     aliases = _dedupe_strings([str(alias) for alias in normalized.get("aliases", [])])
-    product_types = _infer_product_types(task_query=task_query, item=normalized)
+    hints, evidence_by_hint = _infer_product_types(
+        task_query=task_query,
+        item=normalized,
+    )
 
-    if product_types:
-        value.setdefault("product_type", product_types[0])
-        existing_type_aliases = [
-            str(alias) for alias in value.get("product_type_aliases", [])
-        ]
-        value["product_type_aliases"] = _dedupe_strings(
-            existing_type_aliases + product_types
-        )
+    author_provided_type = str(value.get("product_type") or "").strip()
+    ambiguity_entry: str | None = None
+
+    if author_provided_type:
+        value["product_type_hints_soft"] = _dedupe_strings(hints)
         aliases = _dedupe_strings(
-            aliases
-            + product_types
-            + [str(value.get("name") or ""), str(normalized.get("description") or "")]
+            aliases + hints + [author_provided_type, str(value.get("name") or "")]
         )
+    elif not hints:
+        pass
+    else:
+        strong_hints = [
+            hint for hint in hints if len(evidence_by_hint.get(hint, [])) >= 2
+        ]
+        if strong_hints:
+            value["product_type"] = strong_hints[0]
+            value["product_type_aliases"] = _dedupe_strings(
+                [str(alias) for alias in value.get("product_type_aliases", [])]
+                + strong_hints
+            )
+            value["product_type_hints_soft"] = _dedupe_strings(
+                [hint for hint in hints if hint not in strong_hints]
+            )
+            aliases = _dedupe_strings(
+                aliases
+                + strong_hints
+                + [
+                    str(value.get("name") or ""),
+                    str(normalized.get("description") or ""),
+                ]
+            )
+        else:
+            value["product_type_hints_soft"] = _dedupe_strings(hints)
+            key = str(normalized.get("key") or "").strip()
+            if key:
+                ambiguity_entry = (
+                    f"item {key!r} has weak product-type evidence "
+                    f"(hints: {', '.join(hints)}); no hard product_type assigned"
+                )
 
     normalized["aliases"] = aliases
     if isinstance(original_value, dict) or value:
         normalized["value"] = value
-    return normalized
+    return normalized, ambiguity_entry
 
 
 def _coverage_category(item: dict[str, Any]) -> str:
@@ -241,15 +284,68 @@ def _coverage_aliases(item: dict[str, Any]) -> list[str]:
     return _dedupe_strings(aliases)
 
 
+def _validate_checklist_invariants(checklist: TaskChecklist) -> None:
+    """Enforce semantic invariants for normalized shopping checklists."""
+    item_keys = {str(item.get("key") or "") for item in checklist.items}
+    ambiguity_keys: set[str] = set()
+    for entry in checklist.ambiguities:
+        text = str(entry)
+        if text.startswith("item '") and "'" in text[6:]:
+            closing = text.index("'", 6)
+            ambiguity_keys.add(text[6:closing])
+
+    for item in checklist.items:
+        key = str(item.get("key") or "")
+        value = item.get("value") if isinstance(item.get("value"), dict) else {}
+        hard_type = str(value.get("product_type") or "").strip().lower()
+        if not hard_type:
+            continue
+
+        if key in ambiguity_keys:
+            raise ChecklistInvariantError(
+                f"Checklist item {key!r} has both a hard product_type "
+                f"({hard_type!r}) and an ambiguity entry."
+            )
+
+        combined_local = " ".join(
+            part
+            for part in (
+                str(item.get("description") or ""),
+                str(item.get("source_text") or ""),
+                str(value.get("name") or ""),
+            )
+            if part
+        ).lower()
+        aliases = [
+            str(alias).lower() for alias in value.get("product_type_aliases", [])
+        ]
+        candidates = [hard_type] + aliases
+        if not any(
+            candidate and candidate in combined_local for candidate in candidates
+        ):
+            raise ChecklistInvariantError(
+                f"Checklist item {key!r} has hard product_type={hard_type!r} "
+                "but no local textual support. Global task framing does not count."
+            )
+
+    for target in checklist.coverage_targets:
+        if target.key not in item_keys:
+            raise ChecklistInvariantError(
+                f"Coverage target {target.key!r} has no matching checklist item."
+            )
+
+
 def normalize_task_checklist(
     checklist: TaskChecklist,
     *,
     task_query: str,
 ) -> TaskChecklist:
-    normalized_items = [
+    normalization_results = [
         _normalize_checklist_item(item=item, task_query=task_query)
         for item in checklist.items
     ]
+    normalized_items = [result[0] for result in normalization_results]
+    new_ambiguities = [result[1] for result in normalization_results if result[1]]
     items_by_key = {
         str(item.get("key") or ""): item
         for item in normalized_items
@@ -292,14 +388,19 @@ def normalize_task_checklist(
                 )
             )
 
-    return TaskChecklist(
+    combined_ambiguities = _dedupe_strings(
+        list(checklist.ambiguities) + new_ambiguities
+    )
+    result = TaskChecklist(
         checklist_id=checklist.checklist_id,
         items=normalized_items,
         coverage_targets=coverage_targets,
         final_verification_only_keys=list(checklist.final_verification_only_keys),
-        ambiguities=list(checklist.ambiguities),
+        ambiguities=combined_ambiguities,
         compiler_signature=checklist.compiler_signature,
     )
+    _validate_checklist_invariants(result)
+    return result
 
 
 def parse_execution_contract_json(payload: str | dict[str, Any]) -> ExecutionContract:
