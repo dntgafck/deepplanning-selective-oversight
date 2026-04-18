@@ -43,15 +43,17 @@ correctness metric (Case Accuracy) and partial-credit continuous metrics
 
 ## System configurations
 
-Five configurations are compared:
+Five configurations are compared in the active root-wrapper protocol. Current
+repo defaults use `Qwen3.5-9B` as the executor and treat Shopping-first runs as
+the primary selective-oversight evaluation surface:
 
-| System | Executor  | Overseer                    | Trigger policy                       |
-| ------ | --------- | --------------------------- | ------------------------------------ |
-| A      | Qwen3-14B | —                           | None — executor-only baseline        |
-| B      | Qwen3-14B | DeepSeek-V3.2 (thinking)    | Every step — always-on ceiling       |
-| C1     | Qwen3-14B | DeepSeek-V3.2 (thinking)    | Checkpoints only                     |
-| **C2** | Qwen3-14B | DeepSeek-V3.2 (thinking)    | Adaptive filter — primary system     |
-| C2-nt  | Qwen3-14B | DeepSeek-V3.2 (no thinking) | Adaptive filter — reasoning ablation |
+| System | Executor   | Overseer                    | Trigger policy                       |
+| ------ | ---------- | --------------------------- | ------------------------------------ |
+| A      | Qwen3.5-9B | —                           | None — executor-only baseline        |
+| B      | Qwen3.5-9B | DeepSeek-V3.2 (thinking)    | Every step — always-on ceiling       |
+| C1     | Qwen3.5-9B | DeepSeek-V3.2 (thinking)    | Checkpoints only                     |
+| **C2** | Qwen3.5-9B | DeepSeek-V3.2 (thinking)    | Adaptive filter — primary system     |
+| C2-nt  | Qwen3.5-9B | DeepSeek-V3.2 (no thinking) | Adaptive filter — reasoning ablation |
 
 Strong monolithic baselines (GPT-5.2, Claude-4.5-Opus, DeepSeek-V3.2, Qwen3-Max)
 are cited directly from the DeepPlanning paper and not re-run.

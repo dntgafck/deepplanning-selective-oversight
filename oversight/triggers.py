@@ -7,7 +7,7 @@ import re
 from collections.abc import Collection, Sequence
 from typing import Any
 
-from .contracts import CoverageTarget, TaskChecklist
+from .contracts import CoverageTarget, TaskChecklist, build_coverage_index
 
 FAILURE_TOKENS = (
     "error",
@@ -130,22 +130,7 @@ def detect_tool_error(tool_result: Any) -> bool:
 
 
 def _iter_coverage_targets(checklist: TaskChecklist) -> list[CoverageTarget]:
-    if checklist.coverage_targets:
-        return list(checklist.coverage_targets)
-
-    targets: list[CoverageTarget] = []
-    for item in checklist.items:
-        if not item.get("coverage_relevant"):
-            continue
-        targets.append(
-            CoverageTarget(
-                key=str(item["key"]),
-                category=str(item["category"]),
-                aliases=[str(alias) for alias in item.get("aliases", [])],
-                tool_roles=[],
-            )
-        )
-    return targets
+    return list(build_coverage_index(checklist).targets)
 
 
 def _contains_any_alias(text: str, aliases: Sequence[str]) -> bool:

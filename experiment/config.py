@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from deepplanning.config import available_system_names, load_system_defaults
 from llm import ProviderConfig
@@ -35,6 +36,25 @@ class SystemConfig:
     max_hard_blocks_per_args: int = 2
     require_cited_violation_for_block: bool = True
     overseer_call_budget_per_task: int = 8
+
+
+def provider_identity_payload(
+    provider: ProviderConfig | None,
+) -> dict[str, Any] | None:
+    if provider is None:
+        return None
+    return {
+        "requested_model": provider.alias,
+        "resolved_provider": provider.provider,
+        "resolved_model": provider.model,
+    }
+
+
+def system_model_identities(system_config: SystemConfig) -> dict[str, Any]:
+    return {
+        "executor": provider_identity_payload(system_config.executor_provider),
+        "overseer": provider_identity_payload(system_config.overseer_provider),
+    }
 
 
 def build_system_config(

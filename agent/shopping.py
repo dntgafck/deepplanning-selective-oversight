@@ -11,6 +11,7 @@ from typing import Any
 
 from deepplanning.config import OUTPUT_ROOT
 from experiment import StructuredLogger, build_system_config, run_experiment
+from experiment.config import system_model_identities
 from experiment.logging import serialize_exception
 from experiment.progress import InferenceProgressReporter
 from failure_subtypes import (
@@ -47,8 +48,6 @@ from .vendor import (
 
 VendorShoppingFnAgent = load_shopping_agent_class()
 DEFAULT_INFRA_RETRY_LIMIT = 2
-# Deprecated log-compat constant. v1.3 should not emit this from the H1 path.
-REPEATED_BLOCK_STOP_REASON = "oversight_blocked_repeat_limit"
 DEBUG_MESSAGES_ROOT = OUTPUT_ROOT / "_debug_messages" / "shopping"
 TRANSIENT_NOTICE_ROLE = "user"
 
@@ -169,22 +168,23 @@ async def _log_oversight_artifact(
     cache_status: str,
     compiler_signature: str,
     overseer_mode: str,
+    model_identities: dict[str, Any] | None = None,
 ) -> None:
     if logger is None:
         return
-    await logger.log_event(
-        "oversight_artifact",
-        {
-            "domain": "shopping",
-            "task_id": task_id,
-            "run_id": run_id,
-            "artifact_type": artifact_type,
-            "cache_key": cache_key,
-            "cache_status": cache_status,
-            "compiler_signature": compiler_signature,
-            "overseer_mode": overseer_mode,
-        },
-    )
+    payload = {
+        "domain": "shopping",
+        "task_id": task_id,
+        "run_id": run_id,
+        "artifact_type": artifact_type,
+        "cache_key": cache_key,
+        "cache_status": cache_status,
+        "compiler_signature": compiler_signature,
+        "overseer_mode": overseer_mode,
+    }
+    if model_identities is not None:
+        payload["model_identities"] = model_identities
+    await logger.log_event("oversight_artifact", payload)
 
 
 async def _log_notice_injection(
@@ -385,10 +385,6 @@ def _error_summary(error_payload: dict[str, Any]) -> str:
     return f"{error_type}: {message}" if message else str(error_type)
 
 
-def _is_terminal_phase_stop_reason(stop_reason: str) -> bool:
-    return stop_reason == REPEATED_BLOCK_STOP_REASON
-
-
 def _prepare_case_retry_snapshot(
     run_database_dir: Path,
     sample_id: str,
@@ -466,6 +462,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             self._save_messages(messages, messages_file, 0, "Initial messages")
 
         oversight_active = _adaptive_shopping_oversight_active(state, system_config)
+        model_identities = system_model_identities(system_config)
         if oversight_active:
             cache_root = shared_oversight_cache_root
             if cache_root is None:
@@ -492,6 +489,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 overseer_mode=(
                     "thinking" if system_config.overseer_thinking else "non-thinking"
                 ),
+                model_identities=model_identities,
             )
             checklist, checklist_cache_key, checklist_cache_status = (
                 await load_or_build_task_checklist_with_metadata(
@@ -514,6 +512,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 overseer_mode=(
                     "thinking" if system_config.overseer_thinking else "non-thinking"
                 ),
+                model_identities=model_identities,
             )
 
         messages, initial_phase_stop_reason, initial_last_step = await self._run_phase(
@@ -530,30 +529,6 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             trace_id=trace_id,
             session_id=session_id,
         )
-        if _is_terminal_phase_stop_reason(initial_phase_stop_reason):
-            state.record_final_outcome(
-                stop_reason=initial_phase_stop_reason,
-                output="",
-                max_steps_hit=False,
-            )
-            state.finish()
-            if logger is not None and oversight_active:
-                await logger.log_event(
-                    "oversight_run_summary",
-                    {
-                        **state.to_metrics(),
-                        "domain": "shopping",
-                        "task_id": state.task_id,
-                        "run_id": run_id,
-                    },
-                )
-            return TaskResult(
-                task_id=state.task_id,
-                run_id=run_id,
-                output="",
-                messages=messages,
-                state=state,
-            )
         if oversight_active:
             midpoint_action = await _evaluate_oversight_with_budget(
                 logger=logger,
@@ -614,12 +589,11 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         final_output = (
             ""
             if state.final_verification_result == "retry_cap_exhausted"
-            or phase_stop_reason == REPEATED_BLOCK_STOP_REASON
             else _extract_final_output(messages)
         )
         final_stop_reason = (
             phase_stop_reason
-            if phase_stop_reason in {"no_tool_calls", REPEATED_BLOCK_STOP_REASON}
+            if phase_stop_reason == "no_tool_calls"
             else "max_steps_exhausted"
         )
         state.record_final_outcome(
@@ -636,6 +610,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     "domain": "shopping",
                     "task_id": state.task_id,
                     "run_id": run_id,
+                    "model_identities": model_identities,
                 },
             )
         return TaskResult(
@@ -1055,6 +1030,7 @@ async def run_agent_inference_async(
     database_dir: Path,
     tool_schema_path: Path,
     system_prompt: str,
+    overseer_model: str = "deepseek-v3.2",
     output_dir: Path | None = None,
     workers: int = 10,
     max_llm_calls: int = 100,
@@ -1109,9 +1085,11 @@ async def run_agent_inference_async(
     system_config = build_system_config(
         system_name=system,
         executor_model=model,
+        overseer_model=overseer_model,
         max_steps=max_llm_calls,
         num_runs=runs,
     )
+    model_identities = system_model_identities(system_config)
     started_at = time.time()
     loggers: dict[int, StructuredLogger] = {}
 
@@ -1205,6 +1183,7 @@ async def run_agent_inference_async(
                             "failure_subtype": failure_subtype,
                             "observation_valid": observation_valid,
                             "final_output": result.output,
+                            "model_identities": model_identities,
                         }
                     )
                     await progress.record_completion(
@@ -1222,6 +1201,7 @@ async def run_agent_inference_async(
                         "success": True,
                         "failure_subtype": failure_subtype,
                         "observation_valid": observation_valid,
+                        "model_identities": model_identities,
                     }
                 except Exception as exc:
                     if not state.end_time:
@@ -1268,6 +1248,7 @@ async def run_agent_inference_async(
                             "failure_subtype": failure_subtype,
                             "observation_valid": observation_valid,
                             "error": error_payload,
+                            "model_identities": model_identities,
                         },
                     )
                     await logger.log_result(
@@ -1282,6 +1263,7 @@ async def run_agent_inference_async(
                             "observation_valid": observation_valid,
                             "final_output": None,
                             "error": error_payload,
+                            "model_identities": model_identities,
                         }
                     )
                     await progress.record_completion(
@@ -1298,6 +1280,7 @@ async def run_agent_inference_async(
                         "failure_subtype": failure_subtype,
                         "observation_valid": observation_valid,
                         "error": error_payload.get("message", str(exc)),
+                        "model_identities": model_identities,
                     }
         finally:
             _cleanup_case_retry_snapshot(case_snapshot)
@@ -1340,6 +1323,7 @@ def run_agent_inference(
     database_dir: Path,
     tool_schema_path: Path,
     system_prompt: str,
+    overseer_model: str = "deepseek-v3.2",
     output_dir: Path | None = None,
     workers: int = 10,
     max_llm_calls: int = 100,
@@ -1361,6 +1345,7 @@ def run_agent_inference(
                 database_dir=database_dir,
                 tool_schema_path=tool_schema_path,
                 system_prompt=system_prompt,
+                overseer_model=overseer_model,
                 output_dir=output_dir,
                 workers=workers,
                 max_llm_calls=max_llm_calls,

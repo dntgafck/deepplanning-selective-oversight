@@ -1240,7 +1240,7 @@ def test_repeated_hard_blocks_force_approval_in_always_mode(monkeypatch, tmp_pat
     ]
     assert not any(
         record["event_type"] == "executor_turn"
-        and record["stop_reason"] == shopping_module.REPEATED_BLOCK_STOP_REASON
+        and record["stop_reason"] == "oversight_blocked_repeat_limit"
         for record in records
     )
 
@@ -1707,6 +1707,20 @@ def test_shopping_run_agent_inference_still_writes_logs_under_output_dir(
     assert (output_dir / "agent_events.jsonl").exists()
     assert (output_dir / "task_results.jsonl").exists()
     assert not (run_database_dir / "agent_events.jsonl").exists()
+    task_results = _load_jsonl(output_dir / "task_results.jsonl")
+    assert task_results[0]["model_identities"]["executor"]["requested_model"] == (
+        "qwen3.5-9b"
+    )
+    assert task_results[0]["model_identities"]["overseer"]["requested_model"] == (
+        "deepseek-v3.2"
+    )
+    artifact_events = [
+        record
+        for record in _load_jsonl(output_dir / "agent_events.jsonl")
+        if record["event_type"] == "oversight_artifact"
+    ]
+    assert artifact_events
+    assert artifact_events[0]["model_identities"]["overseer"]["resolved_model"]
 
 
 def test_shopping_run_agent_inference_logs_under_output_dir(monkeypatch, tmp_path):
@@ -2106,6 +2120,76 @@ def test_shopping_run_agent_inference_flushes_langfuse(monkeypatch, tmp_path):
 
     assert results["total"] == 0
     assert cleanup_calls == ["shopping"]
+
+
+def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(
+    monkeypatch, tmp_path
+):
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text("[]", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_build_system_config(
+        system_name: str,
+        executor_model: str,
+        overseer_model: str = "deepseek-v3.2",
+        max_steps: int = 400,
+        num_runs: int = 1,
+    ):
+        captured.update(
+            {
+                "system_name": system_name,
+                "executor_model": executor_model,
+                "overseer_model": overseer_model,
+                "max_steps": max_steps,
+                "num_runs": num_runs,
+            }
+        )
+        return SimpleNamespace(
+            executor_provider=SimpleNamespace(
+                alias=executor_model,
+                provider="openai",
+                model="executor-resolved",
+            ),
+            overseer_provider=SimpleNamespace(
+                alias=overseer_model,
+                provider="openai",
+                model="overseer-resolved",
+            ),
+            overseer_thinking=True,
+            max_steps=max_steps,
+        )
+
+    async def fake_run_experiment(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(
+        shopping_module, "build_system_config", fake_build_system_config
+    )
+    monkeypatch.setattr(shopping_module, "run_experiment", fake_run_experiment)
+
+    results = shopping_module.run_agent_inference(
+        model="qwen3.5-9b",
+        overseer_model="qwen-plus",
+        test_data_path=test_data_path,
+        database_dir=tmp_path / "shopping_db",
+        tool_schema_path=SHOPPING_SCHEMA_PATH,
+        system_prompt="prompt",
+        output_dir=tmp_path / "shopping_output",
+        workers=1,
+        max_llm_calls=7,
+        runs=2,
+        system="C2",
+    )
+
+    assert results["total"] == 0
+    assert captured == {
+        "system_name": "C2",
+        "executor_model": "qwen3.5-9b",
+        "overseer_model": "qwen-plus",
+        "max_steps": 7,
+        "num_runs": 2,
+    }
 
 
 def test_travel_run_agent_inference_isolates_multi_run_outputs(monkeypatch, tmp_path):
@@ -2624,6 +2708,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
             {
                 "output_root": kwargs["output_root"],
                 "langfuse_session_id": kwargs["langfuse_session_id"],
+                "overseer_model": kwargs["overseer_model"],
             }
         ),
     )
@@ -2668,6 +2753,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
         {
             "output_root": Path("/tmp") / "bench-session" / "shopping",
             "langfuse_session_id": "bench-session",
+            "overseer_model": "deepseek-v3.2",
         }
     ]
     assert travel_calls == [

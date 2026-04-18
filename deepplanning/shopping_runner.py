@@ -110,6 +110,7 @@ def prepare_run_inputs(
 def run(
     *,
     models: str | list[str] | None = None,
+    overseer_model: str = "deepseek-v3.2",
     levels: int | str | list[int] | list[str] | None = None,
     sample_ids: int | str | list[int] | list[str] | None = None,
     system: str = "A",
@@ -197,6 +198,7 @@ def run(
                 tool_schema_path=tool_schema_path,
                 output_dir=run_output_dirs[0],
                 system_prompt=system_prompt,
+                overseer_model=overseer_model,
                 workers=int(workers),
                 max_llm_calls=int(max_llm_calls),
                 infra_retry_limit=int(infra_retry_limit),

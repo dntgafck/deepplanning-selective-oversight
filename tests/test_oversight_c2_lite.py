@@ -20,6 +20,7 @@ from oversight.contracts import (
     CoverageTarget,
     ExecutionContract,
     TaskChecklist,
+    build_coverage_index,
     execution_contract_to_dict,
     make_checklist_cache_key,
     make_contract_cache_key,
@@ -636,14 +637,7 @@ def test_checklist_parser_does_not_promote_global_framing_to_item_product_type()
                     "source_text": "I need something from Nike in orange.",
                 }
             ],
-            "coverage_targets": [
-                {
-                    "key": "coverage_nike",
-                    "category": "product",
-                    "aliases": ["coverage_nike"],
-                    "tool_roles": ["search"],
-                }
-            ],
+            "coverage_targets": [],
             "final_verification_only_keys": [],
             "ambiguities": [],
             "compiler_signature": "sig",
@@ -655,16 +649,17 @@ def test_checklist_parser_does_not_promote_global_framing_to_item_product_type()
     assert item["value"].get("product_type") in (None, "")
     assert "footwear" not in item["value"].get("product_type_hints_soft", [])
     assert "footwear" not in [alias.lower() for alias in item.get("aliases", [])]
-    assert checklist.coverage_targets[0].key == "nike_orange_product"
+    coverage_index = build_coverage_index(checklist)
+    assert coverage_index.targets[0].key == "nike_orange_product"
     assert "footwear" not in [
-        alias.lower() for alias in checklist.coverage_targets[0].aliases
+        alias.lower() for alias in coverage_index.targets[0].aliases
     ]
 
 
-def test_infer_product_types_uses_item_local_text_only():
-    from oversight.contracts import _infer_product_types
+def test_derive_local_product_type_hints_uses_item_local_text_only():
+    from oversight.contracts import _derive_local_product_type_hints
 
-    hints, evidence = _infer_product_types(
+    hints, evidence = _derive_local_product_type_hints(
         task_query="I'm putting together a complete footwear collection.",
         item={
             "category": "required_product",
@@ -678,15 +673,15 @@ def test_infer_product_types_uses_item_local_text_only():
     assert evidence == {}
 
 
-def test_infer_product_types_promotes_hard_only_with_multiple_local_spans():
+def test_normalize_checklist_item_keeps_even_strong_local_hints_soft():
     from oversight.contracts import _normalize_checklist_item
 
     item = {
         "key": "generic_shoe",
         "category": "required_product",
-        "description": "Casual weekend shoe",
-        "source_text": "I want something casual.",
-        "value": {"name": "Casual pick"},
+        "description": "Casual weekend running shoe",
+        "source_text": "I want something casual for everyday wear.",
+        "value": {"name": "Running shoe pick"},
         "aliases": [],
     }
 
@@ -696,7 +691,7 @@ def test_infer_product_types_promotes_hard_only_with_multiple_local_spans():
     )
 
     assert normalized["value"].get("product_type") in (None, "")
-    assert "shoes" in normalized["value"].get("product_type_hints_soft", [])
+    assert "running shoe" in normalized["value"].get("product_type_hints_soft", [])
     assert ambiguity_entry is not None
     assert "generic_shoe" in ambiguity_entry
 
@@ -740,11 +735,146 @@ def test_checklist_invariants_reject_hard_type_without_local_support():
     try:
         _validate_checklist_invariants(bad)
     except ChecklistInvariantError as exc:
-        assert "local textual support" in str(exc)
+        assert "item-local support metadata" in str(exc)
     else:
         raise AssertionError(
             "Expected ChecklistInvariantError for hard type without local support"
         )
+
+
+def test_checklist_invariants_accept_hard_type_with_support_metadata():
+    from oversight.contracts import _validate_checklist_invariants
+
+    good = TaskChecklist(
+        checklist_id="c-1",
+        items=[
+            {
+                "key": "good_item",
+                "category": "required_product",
+                "description": "Trail running shoe for hiking",
+                "source_text": "Need a trail running shoe.",
+                "value": {
+                    "name": "Trail runner",
+                    "product_type": "running shoe",
+                    "support": {
+                        "product_type": {
+                            "scope": "item_local",
+                            "spans": ["description", "source_text"],
+                            "strength": "explicit",
+                        }
+                    },
+                },
+                "aliases": [],
+            }
+        ],
+        coverage_targets=[
+            CoverageTarget(
+                key="good_item",
+                category="product",
+                aliases=[],
+                tool_roles=["search"],
+            )
+        ],
+        final_verification_only_keys=[],
+        ambiguities=[],
+        compiler_signature="sig",
+    )
+
+    _validate_checklist_invariants(good)
+
+
+def test_checklist_invariants_reject_hard_type_that_coexists_with_ambiguity():
+    from oversight.contracts import (
+        ChecklistInvariantError,
+        _validate_checklist_invariants,
+    )
+
+    bad = TaskChecklist(
+        checklist_id="c-1",
+        items=[
+            {
+                "key": "ambiguous_item",
+                "category": "required_product",
+                "description": "Running shoe",
+                "source_text": "Need a running shoe.",
+                "value": {
+                    "name": "Runner",
+                    "product_type": "running shoe",
+                    "support": {
+                        "product_type": {
+                            "scope": "item_local",
+                            "spans": ["description"],
+                            "strength": "explicit",
+                        }
+                    },
+                },
+                "aliases": [],
+            }
+        ],
+        coverage_targets=[
+            CoverageTarget(
+                key="ambiguous_item",
+                category="product",
+                aliases=[],
+                tool_roles=["search"],
+            )
+        ],
+        final_verification_only_keys=[],
+        ambiguities=["item 'ambiguous_item' remains semantically ambiguous"],
+        compiler_signature="sig",
+    )
+
+    try:
+        _validate_checklist_invariants(bad)
+    except ChecklistInvariantError as exc:
+        assert "ambiguity entry" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected ChecklistInvariantError for hard type with ambiguity entry"
+        )
+
+
+def test_build_coverage_index_is_deterministic_without_mutating_checklist():
+    checklist = parse_task_checklist_json(
+        {
+            "checklist_id": "checklist-1",
+            "items": [
+                {
+                    "key": "shoe_item",
+                    "category": "required_product",
+                    "description": "running shoe from Nike",
+                    "value": {"name": "Nike runner", "brand": "Nike"},
+                    "required": True,
+                    "explicit": True,
+                    "coverage_relevant": True,
+                    "final_verify_only": False,
+                    "aliases": ["nike runner"],
+                    "source_text": "Need a running shoe from Nike.",
+                }
+            ],
+            "coverage_targets": [
+                {
+                    "key": "shoe_item",
+                    "category": "product",
+                    "aliases": ["shoe item"],
+                    "tool_roles": ["search"],
+                }
+            ],
+            "final_verification_only_keys": [],
+            "ambiguities": [],
+            "compiler_signature": "sig",
+        },
+        task_query="Find a running shoe from Nike.",
+    )
+    before = json.loads(json.dumps(task_checklist_to_dict(checklist)))
+
+    first = build_coverage_index(checklist)
+    second = build_coverage_index(checklist)
+
+    assert [target.key for target in first.targets] == ["shoe_item"]
+    assert [target.aliases for target in first.targets] == [second.targets[0].aliases]
+    assert "running shoe" in [alias.lower() for alias in first.targets[0].aliases]
+    assert task_checklist_to_dict(checklist) == before
 
 
 def test_cache_keys_differ_between_thinking_and_non_thinking_compilers():

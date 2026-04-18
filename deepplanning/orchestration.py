@@ -262,6 +262,15 @@ def _executor_models(cfg: Any) -> list[str]:
     return normalize_string_list(value) or ["qwen3.5-9b"]
 
 
+def _overseer_model(cfg: Any) -> str:
+    value = (
+        OmegaConf.to_container(cfg.models.overseer, resolve=True)
+        if OmegaConf.is_config(cfg.models.overseer)
+        else cfg.models.overseer
+    )
+    return str(value or "deepseek-v3.2")
+
+
 def _domain_names(cfg: Any) -> list[str]:
     value = (
         OmegaConf.to_container(cfg.domains, resolve=True)
@@ -281,10 +290,12 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
 
     domain_names = _domain_names(cfg)
     executor_models = _executor_models(cfg)
+    overseer_model = _overseer_model(cfg)
 
     if "shopping" in domain_names:
         run_shopping(
             models=executor_models,
+            overseer_model=overseer_model,
             levels=shopping_cfg.get("levels"),
             sample_ids=shopping_cfg.get("sample_ids"),
             system=system_name,
