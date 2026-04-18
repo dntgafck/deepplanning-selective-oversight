@@ -586,11 +586,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             session_id=session_id,
         )
 
-        final_output = (
-            ""
-            if state.final_verification_result == "retry_cap_exhausted"
-            else _extract_final_output(messages)
-        )
+        final_output = _extract_final_output(messages)
         final_stop_reason = (
             phase_stop_reason
             if phase_stop_reason == "no_tool_calls"

@@ -7,7 +7,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .contracts import ExecutionContract, TaskChecklist
+from .contracts import (
+    CHECKLIST_SANITIZATION_WARNING_PREFIX,
+    ExecutionContract,
+    TaskChecklist,
+)
 from .triggers import classify_mutating_tool, normalize_arguments
 
 
@@ -38,6 +42,16 @@ def _increment_counter(counter: dict[str, int], key: str | None) -> None:
     counter[key] = counter.get(key, 0) + 1
 
 
+def _count_checklist_sanitization_warnings(checklist: TaskChecklist | None) -> int:
+    if checklist is None:
+        return 0
+    return sum(
+        1
+        for entry in checklist.ambiguities
+        if str(entry).startswith(CHECKLIST_SANITIZATION_WARNING_PREFIX)
+    )
+
+
 @dataclass(slots=True)
 class ConversationState:
     task_id: str
@@ -62,8 +76,12 @@ class ConversationState:
     task_checklist: TaskChecklist | None = None
     pending_executor_notice: str | None = None
     last_authoritative_cart_snapshot: dict[str, Any] | None = None
+    tool_event_index: int = 0
     last_authoritative_read_step: int | None = None
     last_mutation_step: int | None = None
+    last_authoritative_read_event_index: int | None = None
+    last_mutation_event_index: int | None = None
+    stale_cart_notice_count: int = 0
     final_verification_retry_count: int = 0
     final_verification_result: str = "not_applicable"
     blocked_mutation_count: int = 0
@@ -76,6 +94,8 @@ class ConversationState:
     intervention_count_by_action: dict[str, int] = field(default_factory=dict)
     executor_cost_usd: float = 0.0
     overseer_cost_usd: float = 0.0
+    runtime_overseer_parse_fallback_count: int = 0
+    final_verifier_parse_fallback_count: int = 0
     _executor_cost_known: bool = field(default=False, init=False, repr=False)
     _overseer_cost_known: bool = field(default=False, init=False, repr=False)
     _budget_exhaustion_logged: bool = field(default=False, init=False, repr=False)
@@ -193,9 +213,11 @@ class ConversationState:
         )["is_mutating"]
 
         self.tool_call_count += 1
+        self.tool_event_index += 1
         record = {
             "phase": phase,
             "step_index": step_index,
+            "event_index": self.tool_event_index,
             "tool_index": tool_index,
             "tool_name": tool_name,
             "arguments_raw": arguments_raw,
@@ -210,8 +232,10 @@ class ConversationState:
         if tool_name == "get_cart_info" and isinstance(result_payload, dict):
             self.last_authoritative_cart_snapshot = result_payload
             self.last_authoritative_read_step = step_index
+            self.last_authoritative_read_event_index = self.tool_event_index
         if is_mutating:
             self.last_mutation_step = step_index
+            self.last_mutation_event_index = self.tool_event_index
             self.blocked_mutation_repeat_count = 0
             self.last_blocked_mutation_tool_name = None
             self.last_blocked_mutation_arguments_normalized = None
@@ -237,6 +261,9 @@ class ConversationState:
         return self.executor_cost_usd + self.overseer_cost_usd
 
     def to_metrics(self) -> dict[str, Any]:
+        final_verification_failed = (
+            self.final_verification_result == "retry_cap_exhausted"
+        )
         return {
             "task_id": self.task_id,
             "domain": self.domain,
@@ -260,9 +287,24 @@ class ConversationState:
             "triggers_fired": self.triggers_fired,
             "final_stop_reason": self.final_stop_reason,
             "final_output_present": self.final_output_present,
+            "final_verification_failed": final_verification_failed,
+            "final_output_preserved_after_verifier_failure": (
+                final_verification_failed and self.final_output_present
+            ),
             "max_steps_hit": self.max_steps_hit,
+            "tool_event_index": self.tool_event_index,
+            "last_authoritative_read_step": self.last_authoritative_read_step,
+            "last_mutation_step": self.last_mutation_step,
+            "last_authoritative_read_event_index": self.last_authoritative_read_event_index,
+            "last_mutation_event_index": self.last_mutation_event_index,
+            "stale_cart_notice_count": self.stale_cart_notice_count,
             "final_verification_result": self.final_verification_result,
             "final_verification_retry_count": self.final_verification_retry_count,
+            "runtime_overseer_parse_fallback_count": self.runtime_overseer_parse_fallback_count,
+            "final_verifier_parse_fallback_count": self.final_verifier_parse_fallback_count,
+            "checklist_sanitization_warning_count": _count_checklist_sanitization_warnings(
+                self.task_checklist
+            ),
             "blocked_mutation_count": self.blocked_mutation_count,
             "blocked_mutation_repeat_count": self.blocked_mutation_repeat_count,
             "blocked_mutation_counts": {

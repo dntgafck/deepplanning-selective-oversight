@@ -73,7 +73,33 @@ The authoritative state snapshot is the source of truth.
 Approve finalization only if the current state satisfies the execution contract and the task checklist.
 Do not solve the task.
 If finalization should be delayed, state the specific blockers and the next required executor actions.
-Output valid JSON only."""
+Output valid JSON only.
+
+Return exactly one JSON object with this shape:
+{
+  "action": "approve" | "run_verification",
+  "pass": true | false,
+  "decision_summary": "string, one sentence",
+  "blockers": [
+    {
+      "kind": "missing_cart_read" | "missing_item" | "constraint_violation" | "stale_state" | "parse_uncertainty" | "other",
+      "message": "short human-readable blocker",
+      "contract_id": "string|null",
+      "checklist_key": "string|null"
+    }
+  ],
+  "next_step_notice_lines": ["string"],
+  "violated_contract_ids": ["string"],
+  "unmet_checklist_keys": ["string"]
+}
+
+Rules:
+- if action == "approve", pass MUST be true and blockers, next_step_notice_lines,
+  violated_contract_ids, and unmet_checklist_keys MUST all be empty
+- if action == "run_verification", pass MUST be false
+- if uncertain, return run_verification with a concrete next action rather than
+  a vague blocker
+- never emit blockers as bare strings"""
 
 DEFAULT_FINAL_NOTICE = (
     "Call get_cart_info before finalizing. The cart state is the source of truth."
@@ -229,13 +255,111 @@ def _coerce_string_list(value: Any) -> list[str]:
         return [value]
     if not isinstance(value, list):
         raise ValueError("Expected a list of strings")
-    return [str(item) for item in value if str(item).strip()]
+    return [str(item) for item in value if item is not None and str(item).strip()]
+
+
+def _coerce_blockers(value: Any) -> list[dict[str, str | None]]:
+    def _normalize_blocker(item: Any) -> dict[str, str | None] | None:
+        if item is None:
+            return None
+        if isinstance(item, str):
+            message = item.strip()
+            if not message:
+                return None
+            return {
+                "kind": "other",
+                "message": message,
+                "contract_id": None,
+                "checklist_key": None,
+            }
+        if isinstance(item, dict):
+            kind = (
+                str(item.get("kind") or item.get("type") or "other").strip() or "other"
+            )
+            message = str(
+                item.get("message")
+                or item.get("detail")
+                or item.get("reason")
+                or item.get("text")
+                or ""
+            ).strip()
+            contract_id = (
+                str(
+                    item.get("contract_id") or item.get("violated_contract_id") or ""
+                ).strip()
+                or None
+            )
+            checklist_key = (
+                str(
+                    item.get("checklist_key") or item.get("unmet_checklist_key") or ""
+                ).strip()
+                or None
+            )
+            if not message:
+                if contract_id:
+                    message = f"Re-check contract constraint: {_humanize_identifier(contract_id)}."
+                elif checklist_key:
+                    message = f"Re-check task requirement: {_humanize_identifier(checklist_key)}."
+                else:
+                    message = _humanize_identifier(kind) or "Unspecified blocker."
+            return {
+                "kind": kind,
+                "message": message,
+                "contract_id": contract_id,
+                "checklist_key": checklist_key,
+            }
+        message = str(item).strip()
+        if not message:
+            return None
+        return {
+            "kind": "other",
+            "message": message,
+            "contract_id": None,
+            "checklist_key": None,
+        }
+
+    if value is None:
+        return []
+    if isinstance(value, (str, dict)):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = [value]
+    blockers: list[dict[str, str | None]] = []
+    for item in values:
+        blocker = _normalize_blocker(item)
+        if blocker is not None and blocker["message"]:
+            blockers.append(blocker)
+    return blockers
 
 
 def _humanize_identifier(value: str) -> str:
     return " ".join(
         token for token in value.replace(":", " ").replace("_", " ").split() if token
     )
+
+
+def _synthesize_final_notice_lines(
+    *,
+    blockers: list[dict[str, str | None]],
+    violated_contract_ids: list[str],
+    unmet_checklist_keys: list[str],
+) -> list[str]:
+    if blockers:
+        blocker = blockers[0]
+        message = str(blocker.get("message") or "").strip()
+        if message:
+            return [message]
+    if violated_contract_ids:
+        return [
+            f"Re-check contract constraint: {_humanize_identifier(violated_contract_ids[0])}."
+        ]
+    if unmet_checklist_keys:
+        return [
+            f"Re-check task requirement: {_humanize_identifier(unmet_checklist_keys[0])}."
+        ]
+    return [DEFAULT_FINAL_NOTICE]
 
 
 def parse_runtime_overseer_json(payload: str | dict[str, Any]) -> dict[str, Any]:
@@ -287,23 +411,41 @@ def parse_final_verifier_json(payload: str | dict[str, Any]) -> dict[str, Any]:
     action = str(data.get("action", "run_verification"))
     if action not in {"approve", "run_verification"}:
         raise ValueError(f"Unsupported final verifier action: {action}")
-    blockers = data.get("blockers", [])
-    if not isinstance(blockers, list):
-        raise ValueError("Final verifier blockers must be a list")
+    blockers = _coerce_blockers(data.get("blockers", []))
+    next_step_notice_lines = _coerce_string_list(data.get("next_step_notice_lines", []))
+    violated_contract_ids = _coerce_string_list(data.get("violated_contract_ids", []))
+    unmet_checklist_keys = _coerce_string_list(data.get("unmet_checklist_keys", []))
+    passed = bool(data.get("pass", False))
+    if action == "approve" and (
+        not passed
+        or blockers
+        or next_step_notice_lines
+        or violated_contract_ids
+        or unmet_checklist_keys
+    ):
+        action = "run_verification"
+        passed = False
+    elif action == "run_verification" and passed:
+        passed = False
+    if action == "approve":
+        blockers = []
+        next_step_notice_lines = []
+        violated_contract_ids = []
+        unmet_checklist_keys = []
+    elif not next_step_notice_lines:
+        next_step_notice_lines = _synthesize_final_notice_lines(
+            blockers=blockers,
+            violated_contract_ids=violated_contract_ids,
+            unmet_checklist_keys=unmet_checklist_keys,
+        )
     return {
         "action": action,
-        "pass": bool(data.get("pass", False)),
+        "pass": passed,
         "decision_summary": str(data.get("decision_summary", "") or ""),
-        "blockers": [dict(item) for item in blockers],
-        "next_step_notice_lines": [
-            str(line) for line in data.get("next_step_notice_lines", [])
-        ],
-        "violated_contract_ids": [
-            str(item) for item in data.get("violated_contract_ids", [])
-        ],
-        "unmet_checklist_keys": [
-            str(item) for item in data.get("unmet_checklist_keys", [])
-        ],
+        "blockers": blockers,
+        "next_step_notice_lines": next_step_notice_lines,
+        "violated_contract_ids": violated_contract_ids,
+        "unmet_checklist_keys": unmet_checklist_keys,
     }
 
 
@@ -380,6 +522,25 @@ def _authoritative_snapshot(state: ConversationState) -> dict[str, Any] | None:
     return build_authoritative_state_snapshot(state.tool_calls_history)
 
 
+def _freshness_payload(state: ConversationState) -> dict[str, Any]:
+    return {
+        "tool_event_index": state.tool_event_index,
+        "last_authoritative_read_step": state.last_authoritative_read_step,
+        "last_mutation_step": state.last_mutation_step,
+        "last_authoritative_read_event_index": state.last_authoritative_read_event_index,
+        "last_mutation_event_index": state.last_mutation_event_index,
+        "stale_cart_notice_count": state.stale_cart_notice_count,
+    }
+
+
+def _cart_read_is_stale(state: ConversationState) -> bool:
+    if state.last_mutation_event_index is None:
+        return False
+    if state.last_authoritative_read_event_index is None:
+        return True
+    return state.last_mutation_event_index > state.last_authoritative_read_event_index
+
+
 def _recent_tool_trajectory(
     state: ConversationState, system_config: Any
 ) -> list[dict[str, Any]]:
@@ -434,6 +595,7 @@ def _final_payload(
         "recent_tool_trajectory": _recent_tool_trajectory(state, system_config),
         "authoritative_state_snapshot": _authoritative_snapshot(state) or {},
         "draft_final_answer": draft_final_answer,
+        "freshness": _freshness_payload(state),
         "finalization_retry_count": state.final_verification_retry_count,
     }
 
@@ -489,10 +651,7 @@ async def _invoke_runtime_overseer(
                                 state
                             )
                             or {},
-                            "freshness": {
-                                "last_authoritative_read_step": state.last_authoritative_read_step,
-                                "last_mutation_step": state.last_mutation_step,
-                            },
+                            "freshness": _freshness_payload(state),
                             "trigger_evidence": trigger_evidence,
                             "response_schema": {
                                 "action": allowed_actions,
@@ -570,6 +729,8 @@ async def _invoke_runtime_overseer(
         action.notice_text = _render_notice_from_action(action)
         return action
     except Exception as exc:
+        if raw_overseer_text is not None:
+            state.runtime_overseer_parse_fallback_count += 1
         return OversightAction(
             should_intervene=False,
             trigger_type=trigger_type,
@@ -607,6 +768,7 @@ async def _invoke_final_verifier(
     if provider is None:
         return _noop_action(system_config=system_config)
 
+    raw_overseer_text: str | None = None
     try:
         response = await call_chat_completion(
             provider=provider,
@@ -630,9 +792,10 @@ async def _invoke_final_verifier(
         )
         cost = estimate_call_cost(response=response, provider=provider)
         state.record_overseer_call(response, cost=cost)
-        parsed = parse_final_verifier_json(
+        raw_overseer_text = str(
             getattr(response.choices[0].message, "content", "") or ""
-        )
+        ).strip()
+        parsed = parse_final_verifier_json(raw_overseer_text)
         prompt_tokens = int(
             getattr(getattr(response, "usage", None), "prompt_tokens", 0) or 0
         )
@@ -654,6 +817,8 @@ async def _invoke_final_verifier(
                 overseer_cost=cost,
                 decision_summary=parsed["decision_summary"],
                 final_verification_result="approved",
+                raw_overseer_text=raw_overseer_text or None,
+                parsed_payload=parsed,
             )
 
         exhausted = _increment_retry_and_check_cap(state, system_config)
@@ -675,12 +840,16 @@ async def _invoke_final_verifier(
             overseer_cost=cost,
             decision_summary=parsed["decision_summary"],
             final_verification_result=state.final_verification_result,
+            raw_overseer_text=raw_overseer_text or None,
+            parsed_payload=parsed,
         )
         action.notice_text = _render_notice_from_action(action)
         if exhausted:
             action.final_verification_result = "retry_cap_exhausted"
         return action
     except Exception as exc:
+        if raw_overseer_text is not None:
+            state.final_verifier_parse_fallback_count += 1
         exhausted = _increment_retry_and_check_cap(state, system_config)
         if not exhausted:
             state.final_verification_result = "repair_requested"
@@ -694,6 +863,7 @@ async def _invoke_final_verifier(
             overseer_mode=_overseer_mode(system_config),
             decision_summary=f"Final verifier fallback: {exc}",
             final_verification_result=state.final_verification_result,
+            raw_overseer_text=raw_overseer_text,
         )
         action.notice_text = _render_notice_from_action(action)
         if exhausted:
@@ -868,26 +1038,27 @@ async def _evaluate_oversight_impl(
                 final_verification_result="retry_cap_exhausted",
             )
 
-        if state.last_mutation_step is not None and (
-            state.last_authoritative_read_step is None
-            or state.last_mutation_step > state.last_authoritative_read_step
-        ):
-            exhausted = _increment_retry_and_check_cap(state, system_config)
-            if not exhausted:
-                state.final_verification_result = "stale_cart_notice"
-            return OversightAction(
-                should_intervene=True,
-                trigger_type="final_checkpoint",
-                trigger_reason="authoritative cart read is stale relative to latest mutation",
-                intervention_type="run_verification",
-                guidance_lines=[DEFAULT_FINAL_NOTICE],
-                notice_text=render_transient_notice(
-                    trigger_type="final_checkpoint",
-                    lines=[DEFAULT_FINAL_NOTICE],
-                ),
-                overseer_mode=_overseer_mode(system_config),
-                final_verification_result=state.final_verification_result,
+        if _cart_read_is_stale(state):
+            max_stale_cart_notices = max(
+                int(getattr(system_config, "max_stale_cart_notices", 1)),
+                0,
             )
+            if state.stale_cart_notice_count < max_stale_cart_notices:
+                state.stale_cart_notice_count += 1
+                state.final_verification_result = "stale_cart_notice"
+                return OversightAction(
+                    should_intervene=True,
+                    trigger_type="final_checkpoint",
+                    trigger_reason="authoritative cart read is stale relative to latest mutation",
+                    intervention_type="run_verification",
+                    guidance_lines=[DEFAULT_FINAL_NOTICE],
+                    notice_text=render_transient_notice(
+                        trigger_type="final_checkpoint",
+                        lines=[DEFAULT_FINAL_NOTICE],
+                    ),
+                    overseer_mode=_overseer_mode(system_config),
+                    final_verification_result=state.final_verification_result,
+                )
 
         return await _invoke_final_verifier(
             task_query=task_query,

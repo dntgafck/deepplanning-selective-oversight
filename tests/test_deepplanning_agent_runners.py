@@ -1565,7 +1565,7 @@ def test_final_checkpoint_stale_cart_precheck_forces_get_cart_info_first(
     )
 
 
-def test_final_checkpoint_retry_cap_exhaustion_returns_empty_final_output(
+def test_final_checkpoint_retry_cap_exhaustion_preserves_final_output(
     monkeypatch, tmp_path
 ):
     run_database_dir = tmp_path / "shopping_db"
@@ -1649,8 +1649,11 @@ def test_final_checkpoint_retry_cap_exhaustion_returns_empty_final_output(
         )
     )
 
-    assert result.output == ""
+    assert result.output == "Phase one complete."
     assert state.final_verification_result == "retry_cap_exhausted"
+    assert state.final_output_present is True
+    assert state.to_metrics()["final_verification_failed"] is True
+    assert state.to_metrics()["final_output_preserved_after_verifier_failure"] is True
 
 
 def test_shopping_run_agent_inference_still_writes_logs_under_output_dir(

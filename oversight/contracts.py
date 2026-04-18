@@ -43,7 +43,8 @@ Required fidelity rules:
 - For any hard item-level semantic field you emit, include item-local grounding metadata under `value.support` with field-specific entries such as `support.product_type = {"scope": "item_local", "spans": [...], "strength": "explicit"}`.
 - Coverage targets must be keyed to the corresponding checklist item keys rather than synthetic placeholder keys."""
 
-CHECKLIST_NORMALIZER_VERSION = "shopping-hardening-v3"
+CHECKLIST_NORMALIZER_VERSION = "shopping-hardening-v4"
+CHECKLIST_SANITIZATION_WARNING_PREFIX = "sanitized:"
 
 
 @dataclass(slots=True)
@@ -132,6 +133,20 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return deduped
 
 
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(value, (list, tuple, set)):
+        return _dedupe_strings(
+            [str(item) for item in value if item is not None and str(item).strip()]
+        )
+    cleaned = str(value).strip()
+    return [cleaned] if cleaned else []
+
+
 def _stringify_value(value: Any) -> str:
     if value is None:
         return ""
@@ -167,9 +182,7 @@ def _normalize_field_support(value: dict[str, Any]) -> dict[str, dict[str, Any]]
             continue
         normalized_metadata = dict(metadata)
         raw_spans = normalized_metadata.get("spans", [])
-        if isinstance(raw_spans, str):
-            raw_spans = [raw_spans]
-        spans = _dedupe_strings([str(span) for span in raw_spans])
+        spans = _string_list(raw_spans)
         if spans:
             normalized_metadata["spans"] = spans
         normalized[str(field_name)] = normalized_metadata
@@ -262,7 +275,7 @@ def _normalize_checklist_item(
         if isinstance(original_value, dict)
         else ({} if original_value is None else {"raw_value": original_value})
     )
-    aliases = _dedupe_strings([str(alias) for alias in normalized.get("aliases", [])])
+    aliases = _string_list(normalized.get("aliases"))
     hints, evidence_by_hint = _derive_local_product_type_hints(
         task_query=task_query,
         item=normalized,
@@ -346,7 +359,7 @@ def _coverage_tool_roles(item: dict[str, Any]) -> list[str]:
 def _coverage_aliases(item: dict[str, Any]) -> list[str]:
     value = item.get("value")
     payload = dict(value) if isinstance(value, dict) else {}
-    aliases = [str(alias) for alias in item.get("aliases", [])]
+    aliases = _string_list(item.get("aliases"))
     aliases.extend(
         [
             str(payload.get("name") or ""),
@@ -356,19 +369,72 @@ def _coverage_aliases(item: dict[str, Any]) -> list[str]:
             str(item.get("description") or ""),
         ]
     )
-    aliases.extend(str(alias) for alias in payload.get("product_type_aliases", []))
+    aliases.extend(_string_list(payload.get("product_type_aliases")))
     return _dedupe_strings(aliases)
+
+
+def _ambiguity_keys(entries: list[str]) -> set[str]:
+    keys: set[str] = set()
+    for entry in entries:
+        text = str(entry)
+        if text.startswith("item '") and "'" in text[6:]:
+            closing = text.index("'", 6)
+            keys.add(text[6:closing])
+    return keys
+
+
+def _has_supported_hard_product_type(item: dict[str, Any]) -> bool:
+    value = item.get("value") if isinstance(item.get("value"), dict) else {}
+    hard_type = str(value.get("product_type") or "").strip().lower()
+    if not hard_type:
+        return True
+
+    aliases = [
+        str(alias).lower() for alias in _string_list(value.get("product_type_aliases"))
+    ]
+    candidates = [hard_type] + aliases
+    support = _normalize_field_support(value)
+    product_type_support = support.get("product_type")
+    return _support_metadata_has_item_local_grounding(
+        item=item,
+        field_support=product_type_support,
+        candidates=candidates,
+    ) or _has_item_local_text_support(
+        item=item,
+        candidates=candidates,
+    )
+
+
+def _sanitize_hard_product_type(
+    *,
+    item: dict[str, Any],
+    hard_type: str,
+    reason: str,
+) -> tuple[dict[str, Any], str]:
+    sanitized = dict(item)
+    value = dict(item.get("value") or {})
+    soft_hints = _dedupe_strings(
+        [hard_type]
+        + _string_list(value.get("product_type_hints_soft"))
+        + _string_list(value.get("product_type_aliases"))
+    )
+    value.pop("product_type", None)
+    value.pop("product_type_aliases", None)
+    if soft_hints:
+        value["product_type_hints_soft"] = soft_hints
+    sanitized["value"] = value
+    key = str(item.get("key") or "")
+    return (
+        sanitized,
+        f"{CHECKLIST_SANITIZATION_WARNING_PREFIX} item {key!r} had unsupported hard "
+        f"product_type {hard_type!r}; downgraded to soft hint ({reason})",
+    )
 
 
 def _validate_checklist_invariants(checklist: TaskChecklist) -> None:
     """Enforce semantic invariants for normalized shopping checklists."""
     item_keys = {str(item.get("key") or "") for item in checklist.items}
-    ambiguity_keys: set[str] = set()
-    for entry in checklist.ambiguities:
-        text = str(entry)
-        if text.startswith("item '") and "'" in text[6:]:
-            closing = text.index("'", 6)
-            ambiguity_keys.add(text[6:closing])
+    ambiguity_keys = _ambiguity_keys(checklist.ambiguities)
 
     for item in checklist.items:
         key = str(item.get("key") or "")
@@ -383,23 +449,7 @@ def _validate_checklist_invariants(checklist: TaskChecklist) -> None:
                 f"({hard_type!r}) and an ambiguity entry."
             )
 
-        aliases = [
-            str(alias).lower() for alias in value.get("product_type_aliases", [])
-        ]
-        candidates = [hard_type] + aliases
-        support = _normalize_field_support(value)
-        product_type_support = support.get("product_type")
-        if not (
-            _support_metadata_has_item_local_grounding(
-                item=item,
-                field_support=product_type_support,
-                candidates=candidates,
-            )
-            or _has_item_local_text_support(
-                item=item,
-                candidates=candidates,
-            )
-        ):
+        if not _has_supported_hard_product_type(item):
             raise ChecklistInvariantError(
                 f"Checklist item {key!r} has hard product_type={hard_type!r} "
                 "but no item-local support metadata or local textual support. "
@@ -411,6 +461,59 @@ def _validate_checklist_invariants(checklist: TaskChecklist) -> None:
             raise ChecklistInvariantError(
                 f"Coverage target {target.key!r} has no matching checklist item."
             )
+
+
+def sanitize_checklist_invariants(
+    checklist: TaskChecklist,
+) -> tuple[TaskChecklist, list[str]]:
+    item_keys = {str(item.get("key") or "") for item in checklist.items}
+    ambiguity_keys = _ambiguity_keys(checklist.ambiguities)
+    warnings: list[str] = []
+    sanitized_items: list[dict[str, Any]] = []
+
+    for item in checklist.items:
+        sanitized_item = dict(item)
+        value = item.get("value") if isinstance(item.get("value"), dict) else {}
+        hard_type = str(value.get("product_type") or "").strip()
+        key = str(item.get("key") or "")
+        if hard_type:
+            if key in ambiguity_keys:
+                sanitized_item, warning = _sanitize_hard_product_type(
+                    item=sanitized_item,
+                    hard_type=hard_type,
+                    reason="item already marked ambiguous",
+                )
+                warnings.append(warning)
+            elif not _has_supported_hard_product_type(item):
+                sanitized_item, warning = _sanitize_hard_product_type(
+                    item=sanitized_item,
+                    hard_type=hard_type,
+                    reason="no item-local support",
+                )
+                warnings.append(warning)
+        sanitized_items.append(sanitized_item)
+
+    sanitized_targets: list[CoverageTarget] = []
+    for target in checklist.coverage_targets:
+        if target.key in item_keys:
+            sanitized_targets.append(target)
+            continue
+        warnings.append(
+            f"{CHECKLIST_SANITIZATION_WARNING_PREFIX} coverage target {target.key!r} "
+            "had no matching checklist item; dropped target"
+        )
+
+    return (
+        TaskChecklist(
+            checklist_id=checklist.checklist_id,
+            items=sanitized_items,
+            coverage_targets=sanitized_targets,
+            final_verification_only_keys=list(checklist.final_verification_only_keys),
+            ambiguities=_dedupe_strings(list(checklist.ambiguities) + warnings),
+            compiler_signature=checklist.compiler_signature,
+        ),
+        warnings,
+    )
 
 
 def normalize_task_checklist(
@@ -436,6 +539,7 @@ def normalize_task_checklist(
         ambiguities=combined_ambiguities,
         compiler_signature=checklist.compiler_signature,
     )
+    result, _ = sanitize_checklist_invariants(result)
     _validate_checklist_invariants(result)
     return result
 
@@ -520,15 +624,15 @@ def parse_task_checklist_json(
             CoverageTarget(
                 key=str(item["key"]),
                 category=str(item["category"]),
-                aliases=[str(alias) for alias in item.get("aliases", [])],
-                tool_roles=[str(role) for role in item.get("tool_roles", [])],
+                aliases=_string_list(item.get("aliases")),
+                tool_roles=_string_list(item.get("tool_roles")),
             )
             for item in data.get("coverage_targets", [])
         ],
-        final_verification_only_keys=[
-            str(item) for item in data.get("final_verification_only_keys", [])
-        ],
-        ambiguities=[str(item) for item in data.get("ambiguities", [])],
+        final_verification_only_keys=_string_list(
+            data.get("final_verification_only_keys")
+        ),
+        ambiguities=_string_list(data.get("ambiguities")),
         compiler_signature=str(data["compiler_signature"]),
     )
     if task_query is not None:

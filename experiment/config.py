@@ -23,6 +23,7 @@ class SystemConfig:
     loop_repeat_count: int = 3
     coverage_threshold: float = 0.50
     final_repair_retry_cap: int = 2
+    max_stale_cart_notices: int = 1
     recent_tool_window: int = 5
     inject_transient_notice: bool = True
     mutating_tools: tuple[str, ...] = (
@@ -96,6 +97,7 @@ def build_system_config(
         loop_repeat_count=int(defaults.get("loop_repeat_count", 3)),
         coverage_threshold=float(defaults.get("coverage_threshold", 0.50)),
         final_repair_retry_cap=int(defaults.get("final_repair_retry_cap", 2)),
+        max_stale_cart_notices=int(defaults.get("max_stale_cart_notices", 1)),
         recent_tool_window=int(defaults.get("recent_tool_window", 5)),
         inject_transient_notice=bool(defaults.get("inject_transient_notice", True)),
         mutating_tools=tuple(

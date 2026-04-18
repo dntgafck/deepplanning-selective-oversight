@@ -17,6 +17,7 @@ from oversight import (
     parse_runtime_overseer_json,
 )
 from oversight.contracts import (
+    CHECKLIST_SANITIZATION_WARNING_PREFIX,
     CoverageTarget,
     ExecutionContract,
     TaskChecklist,
@@ -558,22 +559,92 @@ def test_runtime_overseer_empty_guidance_uses_local_fallback_notice(monkeypatch)
     assert action.h1_outcome in (None, "approve_with_nudge")
 
 
-def test_final_verifier_parser_accepts_valid_p3_json():
+def test_parse_final_verifier_accepts_string_blockers():
     parsed = parse_final_verifier_json(
         {
             "action": "run_verification",
             "pass": False,
-            "decision_summary": "Budget not satisfied.",
-            "blockers": [{"type": "budget", "detail": "Over budget"}],
-            "next_step_notice_lines": ["Call get_cart_info."],
-            "violated_contract_ids": ["rule-1"],
-            "unmet_checklist_keys": ["budget:under-1000"],
+            "decision_summary": "Cart freshness is unknown.",
+            "blockers": "Call get_cart_info before finalizing.",
+            "next_step_notice_lines": [],
+            "violated_contract_ids": [],
+            "unmet_checklist_keys": [],
         }
     )
 
     assert parsed["action"] == "run_verification"
     assert parsed["pass"] is False
-    assert parsed["blockers"][0]["type"] == "budget"
+    assert parsed["blockers"] == [
+        {
+            "kind": "other",
+            "message": "Call get_cart_info before finalizing.",
+            "contract_id": None,
+            "checklist_key": None,
+        }
+    ]
+    assert parsed["next_step_notice_lines"] == ["Call get_cart_info before finalizing."]
+
+
+def test_parse_final_verifier_accepts_dict_blockers():
+    parsed = parse_final_verifier_json(
+        {
+            "action": "run_verification",
+            "pass": False,
+            "decision_summary": "Budget not satisfied.",
+            "blockers": [
+                {
+                    "kind": "constraint_violation",
+                    "message": "Over budget.",
+                    "contract_id": "rule-1",
+                    "checklist_key": "budget:under-1000",
+                }
+            ],
+            "next_step_notice_lines": ["Re-check budget."],
+            "violated_contract_ids": ["rule-1"],
+            "unmet_checklist_keys": ["budget:under-1000"],
+        }
+    )
+
+    assert parsed["blockers"][0] == {
+        "kind": "constraint_violation",
+        "message": "Over budget.",
+        "contract_id": "rule-1",
+        "checklist_key": "budget:under-1000",
+    }
+
+
+def test_parse_final_verifier_coerces_inconsistent_approve_with_blocker():
+    parsed = parse_final_verifier_json(
+        {
+            "action": "approve",
+            "pass": True,
+            "decision_summary": "Looks okay.",
+            "blockers": [{"type": "missing_item", "detail": "Need cart verification"}],
+            "next_step_notice_lines": [],
+            "violated_contract_ids": [],
+            "unmet_checklist_keys": [],
+        }
+    )
+
+    assert parsed["action"] == "run_verification"
+    assert parsed["pass"] is False
+    assert parsed["blockers"][0]["kind"] == "missing_item"
+
+
+def test_parse_final_verifier_synthesizes_notice_for_run_verification():
+    parsed = parse_final_verifier_json(
+        {
+            "action": "run_verification",
+            "pass": False,
+            "decision_summary": "Contract not yet satisfied.",
+            "blockers": [],
+            "next_step_notice_lines": [],
+            "violated_contract_ids": ["rule_1"],
+            "unmet_checklist_keys": [],
+        }
+    )
+
+    assert parsed["next_step_notice_lines"] == ["Re-check contract constraint: rule 1."]
 
 
 def test_runtime_overseer_invalid_json_falls_back_to_approve(monkeypatch):
@@ -619,7 +690,7 @@ def test_runtime_overseer_invalid_json_falls_back_to_approve(monkeypatch):
     assert state.overseer_calls == 1
 
 
-def test_checklist_parser_does_not_promote_global_framing_to_item_product_type():
+def test_global_framing_does_not_create_hard_product_type():
     checklist = parse_task_checklist_json(
         {
             "checklist_id": "checklist-1",
@@ -694,6 +765,125 @@ def test_normalize_checklist_item_keeps_even_strong_local_hints_soft():
     assert "running shoe" in normalized["value"].get("product_type_hints_soft", [])
     assert ambiguity_entry is not None
     assert "generic_shoe" in ambiguity_entry
+
+
+def test_unsupported_hard_product_type_is_downgraded_not_raised():
+    checklist = parse_task_checklist_json(
+        {
+            "checklist_id": "checklist-1",
+            "items": [
+                {
+                    "key": "bad_item",
+                    "category": "required_product",
+                    "description": "Nike training top",
+                    "source_text": "I need a Nike item.",
+                    "value": {
+                        "name": "Training Top",
+                        "brand": "Nike",
+                        "product_type": "footwear",
+                        "product_type_aliases": ["footwear"],
+                    },
+                    "aliases": [],
+                }
+            ],
+            "coverage_targets": [],
+            "final_verification_only_keys": [],
+            "ambiguities": [],
+            "compiler_signature": "sig",
+        },
+        task_query="I need a Nike item.",
+    )
+
+    item = checklist.items[0]
+    assert item["value"].get("product_type") in (None, "")
+    assert "footwear" in item["value"].get("product_type_hints_soft", [])
+    assert any(
+        entry.startswith(CHECKLIST_SANITIZATION_WARNING_PREFIX) and "bad_item" in entry
+        for entry in checklist.ambiguities
+    )
+
+
+def test_orphan_coverage_target_is_dropped_with_ambiguity():
+    checklist = parse_task_checklist_json(
+        {
+            "checklist_id": "checklist-1",
+            "items": [
+                {
+                    "key": "shoe_item",
+                    "category": "required_product",
+                    "description": "running shoe from Nike",
+                    "value": {"name": "Nike runner", "brand": "Nike"},
+                    "required": True,
+                    "explicit": True,
+                    "coverage_relevant": True,
+                    "final_verify_only": False,
+                    "aliases": ["nike runner"],
+                    "source_text": "Need a running shoe from Nike.",
+                }
+            ],
+            "coverage_targets": [
+                {
+                    "key": "missing_item",
+                    "category": "product",
+                    "aliases": ["missing item"],
+                    "tool_roles": ["search"],
+                }
+            ],
+            "final_verification_only_keys": [],
+            "ambiguities": [],
+            "compiler_signature": "sig",
+        },
+        task_query="Find a running shoe from Nike.",
+    )
+
+    assert checklist.coverage_targets == []
+    assert any(
+        entry.startswith(CHECKLIST_SANITIZATION_WARNING_PREFIX)
+        and "missing_item" in entry
+        for entry in checklist.ambiguities
+    )
+
+
+def test_none_aliases_do_not_crash_normalization():
+    checklist = parse_task_checklist_json(
+        {
+            "checklist_id": "checklist-1",
+            "items": [
+                {
+                    "key": "shoe_item",
+                    "category": "required_product",
+                    "description": "running shoe from Nike",
+                    "value": {
+                        "name": "Nike runner",
+                        "brand": "Nike",
+                        "product_type_aliases": None,
+                    },
+                    "required": True,
+                    "explicit": True,
+                    "coverage_relevant": True,
+                    "final_verify_only": False,
+                    "aliases": None,
+                    "source_text": "Need a running shoe from Nike.",
+                }
+            ],
+            "coverage_targets": [
+                {
+                    "key": "shoe_item",
+                    "category": "product",
+                    "aliases": None,
+                    "tool_roles": None,
+                }
+            ],
+            "final_verification_only_keys": None,
+            "ambiguities": None,
+            "compiler_signature": "sig",
+        },
+        task_query="Find a running shoe from Nike.",
+    )
+
+    coverage_index = build_coverage_index(checklist)
+    assert "None" not in checklist.items[0]["aliases"]
+    assert "None" not in coverage_index.targets[0].aliases
 
 
 def test_checklist_invariants_reject_hard_type_without_local_support():
@@ -875,6 +1065,257 @@ def test_build_coverage_index_is_deterministic_without_mutating_checklist():
     assert [target.aliases for target in first.targets] == [second.targets[0].aliases]
     assert "running shoe" in [alias.lower() for alias in first.targets[0].aliases]
     assert task_checklist_to_dict(checklist) == before
+
+
+def test_cart_freshness_uses_event_order_not_phase_local_step():
+    from oversight import _cart_read_is_stale
+
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    state.record_tool_call(
+        {
+            "id": "call_1",
+            "name": "add_product_to_cart",
+            "arguments": '{"product_id":"1"}',
+        },
+        '{"success": true}',
+        phase="initial",
+        step_index=8,
+        tool_index=0,
+        mutating_tools=("add_product_to_cart",),
+    )
+    state.record_tool_call(
+        {"id": "call_2", "name": "get_cart_info", "arguments": "{}"},
+        '{"items":[]}',
+        phase="cart_check",
+        step_index=1,
+        tool_index=0,
+        mutating_tools=("add_product_to_cart",),
+    )
+
+    metrics = state.to_metrics()
+    assert _cart_read_is_stale(state) is False
+    assert metrics["last_mutation_step"] == 8
+    assert metrics["last_authoritative_read_step"] == 1
+    assert metrics["last_mutation_event_index"] == 1
+    assert metrics["last_authoritative_read_event_index"] == 2
+
+
+def test_tool_history_records_monotonic_event_index():
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    mutating_tools = ("add_product_to_cart",)
+
+    state.record_tool_call(
+        {"id": "call_1", "name": "search_products", "arguments": '{"query":"laptop"}'},
+        '["Laptop"]',
+        phase="initial",
+        step_index=1,
+        tool_index=0,
+        mutating_tools=mutating_tools,
+    )
+    state.record_tool_call(
+        {
+            "id": "call_2",
+            "name": "add_product_to_cart",
+            "arguments": '{"product_id":"1"}',
+        },
+        '{"success": true}',
+        phase="initial",
+        step_index=2,
+        tool_index=0,
+        mutating_tools=mutating_tools,
+    )
+    state.record_tool_call(
+        {"id": "call_3", "name": "get_cart_info", "arguments": "{}"},
+        '{"items":[]}',
+        phase="cart_check",
+        step_index=1,
+        tool_index=0,
+        mutating_tools=mutating_tools,
+    )
+
+    assert [entry["event_index"] for entry in state.tool_calls_history] == [1, 2, 3]
+    assert state.tool_event_index == 3
+
+
+def test_stale_cart_notice_does_not_increment_final_retry_count():
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    state.execution_contract = _execution_contract()
+    state.task_checklist = _task_checklist()
+    state.record_tool_call(
+        {
+            "id": "call_1",
+            "name": "add_product_to_cart",
+            "arguments": '{"product_id":"1"}',
+        },
+        '{"success": true}',
+        phase="initial",
+        step_index=1,
+        tool_index=0,
+        mutating_tools=("add_product_to_cart",),
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=2)
+
+    action = asyncio.run(
+        evaluate_oversight(
+            hook="final",
+            state=state,
+            system_config=system_config,
+            phase="cart_check",
+            task_query="buy a laptop",
+            draft_final_answer="Draft final answer.",
+            step_index=2,
+        )
+    )
+
+    assert action.final_verification_result == "stale_cart_notice"
+    assert state.stale_cart_notice_count == 1
+    assert state.final_verification_retry_count == 0
+
+
+def test_repeated_stale_cart_notice_falls_through_to_final_verifier_after_cap(
+    monkeypatch,
+):
+    captured_payloads: list[dict[str, object]] = []
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_payloads.append(json.loads(kwargs["messages"][1]["content"]))
+        return FakeResponse(
+            json.dumps(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+            prompt_tokens=12,
+            completion_tokens=4,
+        )
+
+    import oversight as oversight_module
+
+    monkeypatch.setattr(
+        oversight_module, "call_chat_completion", fake_call_chat_completion
+    )
+
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    state.execution_contract = _execution_contract()
+    state.task_checklist = _task_checklist()
+    state.record_tool_call(
+        {
+            "id": "call_1",
+            "name": "add_product_to_cart",
+            "arguments": '{"product_id":"1"}',
+        },
+        '{"success": true}',
+        phase="initial",
+        step_index=1,
+        tool_index=0,
+        mutating_tools=("add_product_to_cart",),
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=2)
+    system_config.max_stale_cart_notices = 1
+
+    first_action = asyncio.run(
+        evaluate_oversight(
+            hook="final",
+            state=state,
+            system_config=system_config,
+            phase="cart_check",
+            task_query="buy a laptop",
+            draft_final_answer="Draft final answer.",
+            step_index=2,
+        )
+    )
+    second_action = asyncio.run(
+        evaluate_oversight(
+            hook="final",
+            state=state,
+            system_config=system_config,
+            phase="cart_check",
+            task_query="buy a laptop",
+            draft_final_answer="Draft final answer.",
+            step_index=3,
+        )
+    )
+
+    assert first_action.final_verification_result == "stale_cart_notice"
+    assert second_action.final_verification_result == "approved"
+    assert second_action.should_intervene is False
+    assert state.stale_cart_notice_count == 1
+    assert state.final_verification_retry_count == 0
+    assert captured_payloads[0]["freshness"]["last_mutation_event_index"] == 1
+    assert (
+        captured_payloads[0]["freshness"]["last_authoritative_read_event_index"] is None
+    )
+
+
+def test_state_metrics_include_wrapper_failure_and_sanitization_fields():
+    checklist = parse_task_checklist_json(
+        {
+            "checklist_id": "checklist-1",
+            "items": [
+                {
+                    "key": "bad_item",
+                    "category": "required_product",
+                    "description": "Nike training top",
+                    "source_text": "I need a Nike item.",
+                    "value": {
+                        "name": "Training Top",
+                        "brand": "Nike",
+                        "product_type": "footwear",
+                    },
+                    "aliases": [],
+                }
+            ],
+            "coverage_targets": [],
+            "final_verification_only_keys": [],
+            "ambiguities": [],
+            "compiler_signature": "sig",
+        },
+        task_query="I need a Nike item.",
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    state.task_checklist = checklist
+    state.final_verification_result = "retry_cap_exhausted"
+    state.record_final_outcome(
+        stop_reason="no_tool_calls",
+        output="Final cart answer.",
+        max_steps_hit=False,
+    )
+
+    metrics = state.to_metrics()
+    assert metrics["final_verification_failed"] is True
+    assert metrics["final_output_preserved_after_verifier_failure"] is True
+    assert metrics["checklist_sanitization_warning_count"] == 1
 
 
 def test_cache_keys_differ_between_thinking_and_non_thinking_compilers():
