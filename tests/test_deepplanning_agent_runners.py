@@ -1565,6 +1565,111 @@ def test_final_checkpoint_stale_cart_precheck_forces_get_cart_info_first(
     )
 
 
+def test_run_phase_retry_cap_exhaustion_preserves_latest_assistant_turn(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+    messages_path = tmp_path / "messages.json"
+    logger = StructuredLogger(tmp_path / "shopping_logs")
+
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(
+                    content="Retry-capped final draft.",
+                    prompt_tokens=13,
+                    completion_tokens=5,
+                )
+            ]
+        ),
+    )
+
+    async def fake_evaluate_oversight_with_budget(**kwargs):
+        kwargs["state"].final_verification_result = "retry_cap_exhausted"
+        return oversight_module.OversightAction(
+            should_intervene=True,
+            trigger_type="final_checkpoint",
+            intervention_type="message",
+            decision_summary="Retry cap reached.",
+            notice_text="Call get_cart_info before finalizing.",
+            notice_rendered=True,
+            notice_source="final_verifier",
+            overseer_invoked=True,
+            overseer_mode="non-thinking",
+            final_verification_result="retry_cap_exhausted",
+        )
+
+    monkeypatch.setattr(
+        shopping_module,
+        "_evaluate_oversight_with_budget",
+        fake_evaluate_oversight_with_budget,
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=2)
+
+    messages, stop_reason, step_count = asyncio.run(
+        runner._run_phase(
+            messages=[
+                {"role": "system", "content": shopping_module.get_system_prompt(1)},
+                {"role": "user", "content": "buy a laptop"},
+            ],
+            state=state,
+            system_config=system_config,
+            logger=logger,
+            run_id=0,
+            phase_name="cart_check",
+            stop_on_no_calls=True,
+            save_messages=True,
+            messages_file=messages_path,
+            task_query="buy a laptop",
+            trace_id=None,
+            session_id=None,
+        )
+    )
+
+    saved_messages = json.loads(messages_path.read_text(encoding="utf-8"))
+    events = _load_jsonl(logger.output_dir / "agent_events.jsonl")
+    executor_turns = [
+        event for event in events if event["event_type"] == "executor_turn"
+    ]
+    oversight_steps = [
+        event for event in events if event["event_type"] == "oversight_step"
+    ]
+
+    assert stop_reason == "final_verifier_retry_cap_exhausted"
+    assert step_count == 1
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"] == "Retry-capped final draft."
+    assert (
+        shopping_module._extract_final_output(messages) == "Retry-capped final draft."
+    )
+    assert state.final_verification_result == "retry_cap_exhausted"
+    assert state.final_output_present is True
+    assert state.final_stop_reason == "final_verifier_retry_cap_exhausted"
+    assert (
+        saved_messages["description"]
+        == "LLM response (cart_check) - final_verifier_retry_cap_exhausted"
+    )
+    assert saved_messages["messages"][-1]["content"] == "Retry-capped final draft."
+    assert executor_turns[-1]["stop_reason"] == "final_verifier_retry_cap_exhausted"
+    assert oversight_steps[-1]["final_verification_result"] == "retry_cap_exhausted"
+
+
 def test_final_checkpoint_retry_cap_exhaustion_preserves_final_output(
     monkeypatch, tmp_path
 ):
@@ -1649,14 +1754,17 @@ def test_final_checkpoint_retry_cap_exhaustion_preserves_final_output(
         )
     )
 
-    assert result.output == "Phase one complete."
+    assert result.output == "Draft 3"
+    assert result.messages[-1]["content"] == "Draft 3"
     assert state.final_verification_result == "retry_cap_exhausted"
+    assert state.final_stop_reason == "final_verifier_retry_cap_exhausted"
     assert state.final_output_present is True
+    assert state.max_steps_hit is False
     assert state.to_metrics()["final_verification_failed"] is True
     assert state.to_metrics()["final_output_preserved_after_verifier_failure"] is True
 
 
-def test_shopping_run_agent_inference_still_writes_logs_under_output_dir(
+def test_shopping_run_agent_inference_logs_custom_overseer_identity_under_output_dir(
     monkeypatch, tmp_path
 ):
     run_database_dir = tmp_path / "shopping_db"
@@ -1695,6 +1803,7 @@ def test_shopping_run_agent_inference_still_writes_logs_under_output_dir(
 
     results = shopping_module.run_agent_inference(
         model="qwen3.5-9b",
+        overseer_model="qwen-plus",
         test_data_path=test_data_path,
         database_dir=run_database_dir,
         tool_schema_path=SHOPPING_SCHEMA_PATH,
@@ -1715,7 +1824,7 @@ def test_shopping_run_agent_inference_still_writes_logs_under_output_dir(
         "qwen3.5-9b"
     )
     assert task_results[0]["model_identities"]["overseer"]["requested_model"] == (
-        "deepseek-v3.2"
+        "qwen-plus"
     )
     artifact_events = [
         record
@@ -1723,6 +1832,9 @@ def test_shopping_run_agent_inference_still_writes_logs_under_output_dir(
         if record["event_type"] == "oversight_artifact"
     ]
     assert artifact_events
+    assert artifact_events[0]["model_identities"]["overseer"]["requested_model"] == (
+        "qwen-plus"
+    )
     assert artifact_events[0]["model_identities"]["overseer"]["resolved_model"]
 
 

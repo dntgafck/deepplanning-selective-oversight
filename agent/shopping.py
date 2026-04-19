@@ -589,7 +589,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         final_output = _extract_final_output(messages)
         final_stop_reason = (
             phase_stop_reason
-            if phase_stop_reason == "no_tool_calls"
+            if phase_stop_reason
+            in {"no_tool_calls", "final_verifier_retry_cap_exhausted"}
             else "max_steps_exhausted"
         )
         state.record_final_outcome(
@@ -866,7 +867,43 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                                 final_action.final_verification_result
                                 == "retry_cap_exhausted"
                             ):
-                                return messages, "no_tool_calls", step_count
+                                retry_cap_stop_reason = (
+                                    "final_verifier_retry_cap_exhausted"
+                                )
+                                messages.append(assistant_payload)
+                                preserved_output = _extract_final_output(messages)
+                                state.final_output_present = bool(
+                                    preserved_output.strip()
+                                )
+                                state.final_stop_reason = retry_cap_stop_reason
+                                if save_messages and messages_file is not None:
+                                    self._save_messages(
+                                        messages,
+                                        messages_file,
+                                        step_count,
+                                        f"LLM response ({phase_name}) - "
+                                        "final_verifier_retry_cap_exhausted",
+                                    )
+                                if logger is not None:
+                                    await logger.log_turn(
+                                        domain="shopping",
+                                        task_id=state.task_id,
+                                        run_id=run_id,
+                                        phase=phase_name,
+                                        turn_index=step_count,
+                                        started_at=started_at,
+                                        ended_at=ended_at,
+                                        request_messages=request_messages,
+                                        raw_response=response,
+                                        parsed_tool_calls=calls,
+                                        parse_warnings=parse_warnings,
+                                        tool_results=tool_results,
+                                        prompt_tokens=prompt_tokens,
+                                        completion_tokens=completion_tokens,
+                                        stop_reason=retry_cap_stop_reason,
+                                        model_alias=system_config.executor_provider.alias,
+                                    )
+                                return messages, retry_cap_stop_reason, step_count
                             continue
 
                 messages.append(assistant_payload)
