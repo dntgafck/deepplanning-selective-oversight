@@ -21,6 +21,7 @@ from oversight.contracts import (
     CoverageTarget,
     ExecutionContract,
     TaskChecklist,
+    _strict_json_content,
     build_coverage_index,
     execution_contract_to_dict,
     make_checklist_cache_key,
@@ -335,6 +336,15 @@ def test_contract_parser_accepts_valid_p0_json():
     assert contract.compiler_signature.endswith("c2-lite-v1.2")
 
 
+def test_contract_parser_tolerates_markdown_fenced_json():
+    payload = json.dumps(execution_contract_to_dict(_execution_contract()))
+
+    contract = parse_execution_contract_json(f"```json\n{payload}\n```")
+
+    assert contract.contract_id == "contract-shopping"
+    assert contract.domain == "shopping"
+
+
 def test_checklist_parser_accepts_valid_p1_json():
     payload = task_checklist_to_dict(_task_checklist())
     payload["coverage_targets"] = [
@@ -349,6 +359,32 @@ def test_checklist_parser_accepts_valid_p1_json():
 
     assert checklist.checklist_id == "checklist-1"
     assert checklist.coverage_targets[0].key == "product:laptop"
+
+
+def test_checklist_parser_tolerates_wrapped_json_text():
+    payload = task_checklist_to_dict(_task_checklist())
+    payload["coverage_targets"] = [
+        {
+            "key": "product:laptop",
+            "category": "product",
+            "aliases": ["laptop"],
+            "tool_roles": ["search"],
+        }
+    ]
+
+    checklist = parse_task_checklist_json(f"Result:\n{json.dumps(payload)}")
+
+    assert checklist.checklist_id == "checklist-1"
+    assert checklist.coverage_targets[0].key == "product:laptop"
+
+
+def test_strict_json_content_tolerates_fenced_response():
+    payload = execution_contract_to_dict(_execution_contract())
+
+    parsed = _strict_json_content(FakeResponse(f"```json\n{json.dumps(payload)}\n```"))
+
+    assert parsed["contract_id"] == "contract-shopping"
+    assert parsed["domain"] == "shopping"
 
 
 def test_runtime_overseer_parser_accepts_valid_p2_json():

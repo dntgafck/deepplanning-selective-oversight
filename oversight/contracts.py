@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import asdict, dataclass
 from hashlib import sha256
@@ -584,8 +585,40 @@ def build_coverage_index(checklist: TaskChecklist) -> CoverageIndex:
     return CoverageIndex(targets=targets)
 
 
+def _extract_json_content(content: str) -> Any:
+    """Parse slightly malformed LLM JSON wrappers before giving up."""
+    content = content.strip()
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    fence = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        content,
+        re.DOTALL,
+    )
+    if fence:
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        first = content.find(open_ch)
+        last = content.rfind(close_ch)
+        if first != -1 and last > first:
+            try:
+                return json.loads(content[first : last + 1])
+            except json.JSONDecodeError:
+                continue
+
+    return json.loads(content)
+
+
 def parse_execution_contract_json(payload: str | dict[str, Any]) -> ExecutionContract:
-    data = json.loads(payload) if isinstance(payload, str) else payload
+    data = _extract_json_content(payload) if isinstance(payload, str) else payload
     if not isinstance(data, dict):
         raise ValueError("Execution contract payload must be a JSON object")
     return ExecutionContract(
@@ -614,7 +647,7 @@ def parse_task_checklist_json(
     *,
     task_query: str | None = None,
 ) -> TaskChecklist:
-    data = json.loads(payload) if isinstance(payload, str) else payload
+    data = _extract_json_content(payload) if isinstance(payload, str) else payload
     if not isinstance(data, dict):
         raise ValueError("Task checklist payload must be a JSON object")
     checklist = TaskChecklist(
@@ -698,7 +731,7 @@ def _strict_json_content(response: Any) -> dict[str, Any]:
     content = str(getattr(message, "content", "") or "").strip()
     if not content:
         raise ValueError("Overseer returned empty JSON content")
-    payload = json.loads(content)
+    payload = _extract_json_content(content)
     if not isinstance(payload, dict):
         raise ValueError("Overseer JSON payload must be an object")
     return payload

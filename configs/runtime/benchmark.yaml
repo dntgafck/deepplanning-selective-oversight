@@ -1,4 +1,4 @@
 workers: 50
 max_llm_calls: 400
-infra_retry_limit: 10
+infra_retry_limit: 30
 runs: 4
