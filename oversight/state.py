@@ -90,6 +90,7 @@ class ConversationState:
     last_blocked_mutation_arguments_normalized: str | None = None
     blocked_mutation_counts: dict[tuple[str, str], int] = field(default_factory=dict)
     overseer_invocation_count: int = 0
+    consecutive_pre_tool_blocks: int = 0
     overseer_invocation_count_by_trigger: dict[str, int] = field(default_factory=dict)
     intervention_count_by_action: dict[str, int] = field(default_factory=dict)
     executor_cost_usd: float = 0.0
@@ -315,6 +316,7 @@ class ConversationState:
                 ), count in self.blocked_mutation_counts.items()
             },
             "overseer_invocation_count": self.overseer_invocation_count,
+            "consecutive_pre_tool_blocks": self.consecutive_pre_tool_blocks,
             "overseer_invocation_count_by_trigger": self.overseer_invocation_count_by_trigger,
             "intervention_count_by_action": self.intervention_count_by_action,
             "wall_time_seconds": self.wall_time_seconds,

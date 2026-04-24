@@ -81,6 +81,9 @@ When triggered, the overseer applies a graduated correction — from a light
 redirect up to directly re-querying a tool and injecting the authoritative
 result — then execution resumes.
 
+Loop and retry failure-mode semantics are documented in
+[`docs/loop_scenarios.md`](docs/loop_scenarios.md).
+
 ---
 
 ## Research questions

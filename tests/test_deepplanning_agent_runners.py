@@ -1225,6 +1225,7 @@ def test_repeated_hard_blocks_force_approval_in_always_mode(monkeypatch, tmp_pat
     assert state.final_output_present is True
     assert state.max_steps_hit is False
     assert state.blocked_mutation_count == 2
+    assert state.consecutive_pre_tool_blocks == 0
     assert len(captured_calls) == 6
     records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
     oversight_steps = [
@@ -1242,6 +1243,294 @@ def test_repeated_hard_blocks_force_approval_in_always_mode(monkeypatch, tmp_pat
         record["event_type"] == "executor_turn"
         and record["stop_reason"] == "oversight_blocked_repeat_limit"
         for record in records
+    )
+    assert not any(
+        record["event_type"] == "overseer_streak_cap_fired" for record in records
+    )
+
+
+def test_system_b_streak_cap_force_approves_distinct_args_loop(monkeypatch, tmp_path):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_1",
+                            "search_products",
+                            '{"query":"red shoes"}',
+                        )
+                    ],
+                    prompt_tokens=10,
+                    completion_tokens=4,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_2",
+                            "search_products",
+                            '{"query":"red sneakers"}',
+                        )
+                    ],
+                    prompt_tokens=11,
+                    completion_tokens=4,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_3",
+                            "search_products",
+                            '{"query":"blue shoes"}',
+                        )
+                    ],
+                    prompt_tokens=12,
+                    completion_tokens=4,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_4",
+                            "search_products",
+                            '{"query":"blue sneakers"}',
+                        )
+                    ],
+                    prompt_tokens=13,
+                    completion_tokens=4,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_5",
+                            "search_products",
+                            '{"query":"green shoes"}',
+                        )
+                    ],
+                    prompt_tokens=14,
+                    completion_tokens=4,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="",
+                    tool_calls=[
+                        FakeToolCall(
+                            "call_6",
+                            "search_products",
+                            '{"query":"green sneakers"}',
+                        )
+                    ],
+                    prompt_tokens=15,
+                    completion_tokens=4,
+                    finish_reason="tool_calls",
+                ),
+                FakeResponse(
+                    content="Phase one complete.",
+                    prompt_tokens=16,
+                    completion_tokens=5,
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        oversight_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                _fake_json_response(
+                    {
+                        "action": "provide_guidance",
+                        "decision_summary": "Search pattern still violates the task.",
+                        "violation_evidence": {
+                            "violated_contract_ids": ["rule-1"],
+                            "unmet_checklist_keys": [],
+                            "confidence": "high",
+                        },
+                        "guidance_lines": ["Change course before searching again."],
+                        "corrected_observation": None,
+                    }
+                ),
+                _fake_json_response(
+                    {
+                        "action": "provide_guidance",
+                        "decision_summary": "Search pattern still violates the task.",
+                        "violation_evidence": {
+                            "violated_contract_ids": ["rule-1"],
+                            "unmet_checklist_keys": [],
+                            "confidence": "high",
+                        },
+                        "guidance_lines": ["Change course before searching again."],
+                        "corrected_observation": None,
+                    }
+                ),
+                _fake_json_response(
+                    {
+                        "action": "provide_guidance",
+                        "decision_summary": "Search pattern still violates the task.",
+                        "violation_evidence": {
+                            "violated_contract_ids": ["rule-1"],
+                            "unmet_checklist_keys": [],
+                            "confidence": "high",
+                        },
+                        "guidance_lines": ["Change course before searching again."],
+                        "corrected_observation": None,
+                    }
+                ),
+                _fake_json_response(
+                    {
+                        "action": "provide_guidance",
+                        "decision_summary": "Search pattern still violates the task.",
+                        "violation_evidence": {
+                            "violated_contract_ids": ["rule-1"],
+                            "unmet_checklist_keys": [],
+                            "confidence": "high",
+                        },
+                        "guidance_lines": ["Change course before searching again."],
+                        "corrected_observation": None,
+                    }
+                ),
+                _fake_json_response(
+                    {
+                        "action": "provide_guidance",
+                        "decision_summary": "Search pattern still violates the task.",
+                        "violation_evidence": {
+                            "violated_contract_ids": ["rule-1"],
+                            "unmet_checklist_keys": [],
+                            "confidence": "high",
+                        },
+                        "guidance_lines": ["Change course before searching again."],
+                        "corrected_observation": None,
+                    }
+                ),
+                _fake_json_response(
+                    {
+                        "action": "provide_guidance",
+                        "decision_summary": "Search pattern still violates the task.",
+                        "violation_evidence": {
+                            "violated_contract_ids": ["rule-1"],
+                            "unmet_checklist_keys": [],
+                            "confidence": "high",
+                        },
+                        "guidance_lines": ["Change course before searching again."],
+                        "corrected_observation": None,
+                    }
+                ),
+                _fake_json_response(
+                    {
+                        "action": "approve",
+                        "decision_summary": "Result reviewed.",
+                        "violation_evidence": {
+                            "violated_contract_ids": [],
+                            "unmet_checklist_keys": [],
+                            "confidence": "low",
+                        },
+                        "guidance_lines": [],
+                        "corrected_observation": None,
+                    }
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: '{"items":[{"title":"Result"}]}',
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="B",
+    )
+    state.execution_contract = oversight_contracts.parse_execution_contract_json(
+        {
+            **_shopping_contract_payload(),
+            "compiler_signature": "test-overseer-signature",
+        }
+    )
+    state.task_checklist = oversight_contracts.parse_task_checklist_json(
+        {
+            **_shopping_checklist_payload(),
+            "compiler_signature": "test-overseer-signature",
+        }
+    )
+    logger = StructuredLogger(tmp_path / "shopping_logs")
+    system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=7)
+
+    messages, stop_reason, step_count = asyncio.run(
+        runner._run_phase(
+            messages=[
+                {"role": "system", "content": shopping_module.get_system_prompt(1)},
+                {"role": "user", "content": "buy shoes"},
+            ],
+            state=state,
+            system_config=system_config,
+            logger=logger,
+            run_id=0,
+            phase_name="initial",
+            stop_on_no_calls=False,
+            save_messages=False,
+            messages_file=None,
+            task_query="buy shoes",
+            trace_id=None,
+            session_id=None,
+        )
+    )
+
+    assert stop_reason == "phase_break"
+    assert step_count == 7
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"] == "Phase one complete."
+    assert state.tool_call_count == 1
+    assert state.consecutive_pre_tool_blocks == 0
+
+    records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
+    pre_tool_steps = [
+        record
+        for record in records
+        if record["event_type"] == "oversight_step"
+        and record.get("trigger_type") == "always_on_pre_tool"
+    ]
+    streak_events = [
+        record
+        for record in records
+        if record["event_type"] == "overseer_streak_cap_fired"
+    ]
+
+    assert [record["h1_outcome"] for record in pre_tool_steps] == [
+        "hard_block",
+        "hard_block",
+        "hard_block",
+        "hard_block",
+        "hard_block",
+        "forced_approve",
+    ]
+    assert pre_tool_steps[-1]["intervention_type"] == "overseer_override_streak_cap"
+    assert len(streak_events) == 1
+    assert streak_events[0]["streak_length"] == 5
+    assert streak_events[0]["blocked_tool_name"] == "search_products"
+    assert (
+        streak_events[0]["blocked_tool_arguments_normalized"]
+        == '{"query":"green sneakers"}'
     )
 
 
@@ -2248,6 +2537,86 @@ def test_shopping_run_agent_inference_flushes_langfuse(monkeypatch, tmp_path):
 
     assert results["total"] == 0
     assert cleanup_calls == ["shopping"]
+
+
+def test_always_mode_budget_exhaustion_returns_none_without_error(monkeypatch):
+    evaluate_calls: list[int] = []
+
+    async def fake_evaluate_oversight(**kwargs):
+        state = kwargs["state"]
+        state.overseer_invocation_count += 1
+        evaluate_calls.append(kwargs["step_index"])
+        return oversight_module.OversightAction(
+            should_intervene=False,
+            trigger_type="always_on_pre_tool",
+            intervention_type="approve",
+            overseer_invoked=True,
+            overseer_mode="thinking",
+        )
+
+    monkeypatch.setattr(shopping_module, "evaluate_oversight", fake_evaluate_oversight)
+
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="B",
+    )
+    system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
+    system_config.overseer_call_budget_per_task = 1
+
+    first_action = asyncio.run(
+        shopping_module._evaluate_oversight_with_budget(
+            logger=None,
+            budget_state=state,
+            run_id=0,
+            budget_phase="initial",
+            budget_step_index=1,
+            budget_system_config=system_config,
+            hook="pre_tool",
+            state=state,
+            system_config=system_config,
+            phase="initial",
+            task_query="buy a laptop",
+            proposed_tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "search_products",
+                    "arguments": '{"query":"laptop"}',
+                }
+            ],
+            step_index=1,
+        )
+    )
+    second_action = asyncio.run(
+        shopping_module._evaluate_oversight_with_budget(
+            logger=None,
+            budget_state=state,
+            run_id=0,
+            budget_phase="initial",
+            budget_step_index=2,
+            budget_system_config=system_config,
+            hook="pre_tool",
+            state=state,
+            system_config=system_config,
+            phase="initial",
+            task_query="buy a laptop",
+            proposed_tool_calls=[
+                {
+                    "id": "call_2",
+                    "name": "search_products",
+                    "arguments": '{"query":"laptop under 1000"}',
+                }
+            ],
+            step_index=2,
+        )
+    )
+
+    assert first_action is not None
+    assert first_action.trigger_type == "always_on_pre_tool"
+    assert second_action is None
+    assert evaluate_calls == [1]
+    assert state.overseer_invocation_count == 1
 
 
 def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(

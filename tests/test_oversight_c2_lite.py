@@ -726,6 +726,249 @@ def test_runtime_overseer_invalid_json_falls_back_to_approve(monkeypatch):
     assert state.overseer_calls == 1
 
 
+def test_always_mode_pre_tool_invokes_overseer_without_mutation_or_loop(monkeypatch):
+    captured_payloads: list[dict[str, object]] = []
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_payloads.append(json.loads(kwargs["messages"][1]["content"]))
+        return FakeResponse(
+            json.dumps(
+                {
+                    "action": "approve",
+                    "decision_summary": "Reviewed.",
+                    "violation_evidence": {
+                        "violated_contract_ids": [],
+                        "unmet_checklist_keys": [],
+                        "confidence": "low",
+                    },
+                    "guidance_lines": [],
+                    "corrected_observation": None,
+                }
+            ),
+            prompt_tokens=12,
+            completion_tokens=4,
+        )
+
+    import oversight as oversight_module
+
+    monkeypatch.setattr(
+        oversight_module, "call_chat_completion", fake_call_chat_completion
+    )
+
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="B",
+    )
+    state.execution_contract = _execution_contract()
+    state.task_checklist = _task_checklist()
+    system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
+
+    action = asyncio.run(
+        evaluate_oversight(
+            hook="pre_tool",
+            state=state,
+            system_config=system_config,
+            phase="initial",
+            task_query="buy a laptop under 1000",
+            proposed_tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "search_products",
+                    "arguments": '{"query":"laptop under 1000"}',
+                }
+            ],
+            step_index=1,
+        )
+    )
+
+    assert action.trigger_type == "always_on_pre_tool"
+    assert action.overseer_invoked is True
+    assert state.overseer_calls == 1
+    assert captured_payloads[0]["trigger_type"] == "always_on_pre_tool"
+    assert action.blocked_tool_name == "search_products"
+    assert action.blocked_tool_arguments == '{"query":"laptop under 1000"}'
+    assert action.blocked_tool_arguments_normalized == '{"query":"laptop under 1000"}'
+
+
+def test_always_mode_post_tool_invokes_overseer_without_error(monkeypatch):
+    captured_payloads: list[dict[str, object]] = []
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_payloads.append(json.loads(kwargs["messages"][1]["content"]))
+        return FakeResponse(
+            json.dumps(
+                {
+                    "action": "approve",
+                    "decision_summary": "Reviewed.",
+                    "violation_evidence": {
+                        "violated_contract_ids": [],
+                        "unmet_checklist_keys": [],
+                        "confidence": "low",
+                    },
+                    "guidance_lines": [],
+                    "corrected_observation": None,
+                }
+            ),
+            prompt_tokens=10,
+            completion_tokens=3,
+        )
+
+    import oversight as oversight_module
+
+    monkeypatch.setattr(
+        oversight_module, "call_chat_completion", fake_call_chat_completion
+    )
+
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="B",
+    )
+    state.execution_contract = _execution_contract()
+    state.task_checklist = _task_checklist()
+    system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
+
+    action = asyncio.run(
+        evaluate_oversight(
+            hook="post_tool",
+            state=state,
+            system_config=system_config,
+            phase="initial",
+            task_query="buy a laptop under 1000",
+            latest_tool_result='{"success": true, "items": []}',
+            step_index=1,
+            tool_index=0,
+        )
+    )
+
+    assert action.trigger_type == "always_on_post_tool"
+    assert action.overseer_invoked is True
+    assert state.overseer_calls == 1
+    assert captured_payloads[0]["trigger_type"] == "always_on_post_tool"
+
+
+def test_checkpoint_midpoint_invokes_overseer_and_pre_tool_is_disabled(monkeypatch):
+    captured_payloads: list[dict[str, object]] = []
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_payloads.append(json.loads(kwargs["messages"][1]["content"]))
+        return FakeResponse(
+            json.dumps(
+                {
+                    "action": "approve",
+                    "decision_summary": "Coverage check completed.",
+                    "violation_evidence": {
+                        "violated_contract_ids": [],
+                        "unmet_checklist_keys": [],
+                        "confidence": "low",
+                    },
+                    "guidance_lines": [],
+                    "corrected_observation": None,
+                }
+            ),
+            prompt_tokens=9,
+            completion_tokens=3,
+        )
+
+    import oversight as oversight_module
+
+    monkeypatch.setattr(
+        oversight_module, "call_chat_completion", fake_call_chat_completion
+    )
+
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C1",
+    )
+    state.execution_contract = _execution_contract()
+    state.task_checklist = _task_checklist()
+    system_config = build_system_config("C1", executor_model="qwen3.5-9b", max_steps=2)
+
+    midpoint_action = asyncio.run(
+        evaluate_oversight(
+            hook="midpoint",
+            state=state,
+            system_config=system_config,
+            phase="initial",
+            task_query="buy a laptop under 1000",
+            step_index=1,
+        )
+    )
+    pre_tool_action = asyncio.run(
+        evaluate_oversight(
+            hook="pre_tool",
+            state=state,
+            system_config=system_config,
+            phase="initial",
+            task_query="buy a laptop under 1000",
+            proposed_tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "add_product_to_cart",
+                    "arguments": '{"product_id":"1"}',
+                }
+            ],
+            step_index=2,
+        )
+    )
+
+    assert midpoint_action.trigger_type == "coverage_deficit"
+    assert midpoint_action.overseer_invoked is True
+    assert pre_tool_action.overseer_invoked is False
+    assert pre_tool_action.trigger_type is None
+    assert state.overseer_calls == 1
+    assert captured_payloads[0]["trigger_type"] == "coverage_deficit"
+
+
+def test_checkpoint_pre_tool_suppresses_mutating_action(monkeypatch):
+    async def unexpected_call_chat_completion(**kwargs):
+        raise AssertionError("checkpoint pre-tool should not invoke the overseer")
+
+    import oversight as oversight_module
+
+    monkeypatch.setattr(
+        oversight_module,
+        "call_chat_completion",
+        unexpected_call_chat_completion,
+    )
+
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C1",
+    )
+    system_config = build_system_config("C1", executor_model="qwen3.5-9b", max_steps=2)
+
+    action = asyncio.run(
+        evaluate_oversight(
+            hook="pre_tool",
+            state=state,
+            system_config=system_config,
+            phase="initial",
+            task_query="buy a laptop under 1000",
+            proposed_tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "add_product_to_cart",
+                    "arguments": '{"product_id":"1"}',
+                }
+            ],
+            step_index=1,
+        )
+    )
+
+    assert action.should_intervene is False
+    assert action.overseer_invoked is False
+    assert action.trigger_type is None
+    assert state.overseer_calls == 0
+
+
 def test_global_framing_does_not_create_hard_product_type():
     checklist = parse_task_checklist_json(
         {

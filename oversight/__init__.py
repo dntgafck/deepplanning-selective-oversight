@@ -136,6 +136,15 @@ def compute_h1_outcome(
         if action.intervention_type == "provide_guidance":
             return H1Outcome.APPROVE_WITH_NUDGE
         return H1Outcome.APPROVE_CONTINUE
+
+    max_streak = int(getattr(system_config, "max_consecutive_pre_tool_blocks", 5))
+    if (
+        max_streak > 0
+        and state.consecutive_pre_tool_blocks >= max_streak
+        and action.intervention_type == "provide_guidance"
+    ):
+        return H1Outcome.FORCED_APPROVE
+
     if mode == "always":
         if action.intervention_type == "provide_guidance":
             from .state import _hash_arguments
@@ -478,6 +487,13 @@ def _synthesize_guidance_lines(
             guidance_lines.append(
                 "Do not repeat the blocked cart mutation until you verify a different candidate or cart state."
             )
+    elif trigger_type == "always_on_pre_tool":
+        if tool_name:
+            guidance_lines.append(f"Review {tool_name} before continuing.")
+        else:
+            guidance_lines.append("Review the proposed tool call before continuing.")
+    elif trigger_type == "always_on_post_tool":
+        guidance_lines.append("Review the latest tool result before continuing.")
     elif trigger_type == "loop_detection":
         guidance_lines.append(
             "The current proposal repeats a blocked pattern. Change strategy before using another cart mutation."
@@ -568,12 +584,47 @@ def _coverage_guidance_lines(
     ]
 
 
-def _activation_enabled(*, state: ConversationState, system_config: Any) -> bool:
-    return bool(
-        getattr(system_config, "oversight_enabled", False)
-        and getattr(system_config, "oversight_mode", None) == "adaptive"
-        and state.domain == "shopping"
-    )
+# Valid hook names. Matches the Literal on _evaluate_oversight_impl.
+_OVERSIGHT_HOOKS = frozenset({"pre_tool", "post_tool", "midpoint", "final"})
+
+# Which hooks each mode opts into. "disabled" = System A.
+_HOOKS_BY_MODE: dict[str, frozenset[str]] = {
+    "disabled": frozenset(),
+    "always": frozenset({"pre_tool", "post_tool", "midpoint", "final"}),
+    "checkpoint": frozenset({"midpoint", "final"}),
+    "adaptive": frozenset({"pre_tool", "post_tool", "midpoint", "final"}),
+}
+
+
+def _oversight_active_for_hook(
+    *,
+    state: ConversationState,
+    system_config: Any,
+    hook: str,
+) -> bool:
+    """Return True iff the given hook should invoke oversight for this mode."""
+    if hook not in _OVERSIGHT_HOOKS:
+        raise ValueError(f"Unknown oversight hook: {hook!r}")
+    if not bool(getattr(system_config, "oversight_enabled", False)):
+        return False
+    if state.domain != "shopping":
+        return False
+    mode = str(getattr(system_config, "oversight_mode", "disabled"))
+    return hook in _HOOKS_BY_MODE.get(mode, frozenset())
+
+
+def _oversight_active_for_task(
+    *,
+    state: ConversationState,
+    system_config: Any,
+) -> bool:
+    """Return True iff the task mode enables at least one oversight hook."""
+    if not bool(getattr(system_config, "oversight_enabled", False)):
+        return False
+    if state.domain != "shopping":
+        return False
+    mode = str(getattr(system_config, "oversight_mode", "disabled"))
+    return bool(_HOOKS_BY_MODE.get(mode, frozenset()))
 
 
 def _final_payload(
@@ -584,9 +635,7 @@ def _final_payload(
     draft_final_answer: str,
 ) -> dict[str, Any]:
     if state.execution_contract is None or state.task_checklist is None:
-        raise ValueError(
-            "Adaptive oversight requires execution contract and task checklist"
-        )
+        raise ValueError("Oversight requires execution contract and task checklist")
     return {
         "mode": "final_verification",
         "task_query": task_query,
@@ -884,11 +933,16 @@ async def _evaluate_oversight_impl(
     step_index: int = 0,
     tool_index: int | None = None,
 ) -> OversightAction:
-    if not _activation_enabled(state=state, system_config=system_config):
+    if not _oversight_active_for_hook(
+        state=state,
+        system_config=system_config,
+        hook=hook,
+    ):
         return _noop_action(system_config=system_config)
 
     if hook == "pre_tool":
         calls = proposed_tool_calls or []
+        mode = str(getattr(system_config, "oversight_mode", "disabled"))
         for index, call in enumerate(calls):
             classification = classify_mutating_tool(
                 str(call.get("name") or ""),
@@ -951,10 +1005,63 @@ async def _evaluate_oversight_impl(
             )
             return action
 
+        if mode == "always" and calls:
+            action = await _invoke_runtime_overseer(
+                trigger_type="always_on_pre_tool",
+                allowed_actions=["approve", "provide_guidance"],
+                task_query=task_query,
+                state=state,
+                system_config=system_config,
+                phase=phase,
+                step_index=step_index,
+                tool_index=0,
+                proposed_tool_calls=calls,
+                latest_tool_result=None,
+                trigger_reason="always-on pre-tool oversight (System B)",
+                trigger_evidence={
+                    "mode": "always",
+                    "tool_name": str(calls[0].get("name") or ""),
+                    "proposed_call_count": len(calls),
+                },
+            )
+            action.blocked_tool_name = str(calls[0].get("name") or "")
+            action.blocked_tool_arguments = calls[0].get("arguments")
+            action.blocked_tool_arguments_normalized = normalize_arguments(
+                calls[0].get("arguments")
+            )
+            return action
+
         return _noop_action(system_config=system_config)
 
     if hook == "post_tool":
-        if not detect_tool_error(latest_tool_result):
+        mode = str(getattr(system_config, "oversight_mode", "disabled"))
+        has_error = detect_tool_error(latest_tool_result)
+        if mode == "always":
+            action = await _invoke_runtime_overseer(
+                trigger_type="always_on_post_tool",
+                allowed_actions=[
+                    "approve",
+                    "provide_guidance",
+                    "correct_observation",
+                ],
+                task_query=task_query,
+                state=state,
+                system_config=system_config,
+                phase=phase,
+                step_index=step_index,
+                tool_index=tool_index,
+                proposed_tool_calls=None,
+                latest_tool_result=latest_tool_result,
+                trigger_reason="always-on post-tool oversight (System B)",
+                trigger_evidence={
+                    "mode": "always",
+                    "tool_error_detected": has_error,
+                },
+            )
+            action.notice_text = _render_notice_from_action(action)
+            return action
+
+        if not has_error:
             return _noop_action(system_config=system_config)
         action = await _invoke_runtime_overseer(
             trigger_type="error_occurrence",
@@ -1112,6 +1219,9 @@ def apply_intervention(*args: Any, **kwargs: Any) -> Any:
 
 
 __all__ = [
+    "_HOOKS_BY_MODE",
+    "_oversight_active_for_hook",
+    "_oversight_active_for_task",
     "ConversationState",
     "H1Outcome",
     "OversightAction",

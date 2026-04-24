@@ -33,6 +33,8 @@ from llm import (
 from oversight import (
     ConversationState,
     H1Outcome,
+    _oversight_active_for_hook,
+    _oversight_active_for_task,
     apply_intervention,
     compute_h1_outcome,
     evaluate_oversight,
@@ -341,17 +343,6 @@ async def _evaluate_oversight_with_budget(
     return None
 
 
-def _adaptive_shopping_oversight_active(
-    state: ConversationState,
-    system_config: Any,
-) -> bool:
-    return bool(
-        system_config.oversight_enabled
-        and system_config.oversight_mode == "adaptive"
-        and state.domain == "shopping"
-    )
-
-
 def _resolve_run_database_dir(
     base_database_dir: Path,
     run_id: int,
@@ -464,9 +455,12 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         if save_messages and messages_file is not None:
             self._save_messages(messages, messages_file, 0, "Initial messages")
 
-        oversight_active = _adaptive_shopping_oversight_active(state, system_config)
+        oversight_runs_any_hook = _oversight_active_for_task(
+            state=state,
+            system_config=system_config,
+        )
         model_identities = system_model_identities(system_config)
-        if oversight_active:
+        if oversight_runs_any_hook:
             cache_root = shared_oversight_cache_root
             if cache_root is None:
                 cache_root = Path(self.database_base_path).parent / "_oversight_cache"
@@ -532,7 +526,11 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             trace_id=trace_id,
             session_id=session_id,
         )
-        if oversight_active:
+        if _oversight_active_for_hook(
+            state=state,
+            system_config=system_config,
+            hook="midpoint",
+        ):
             midpoint_action = await _evaluate_oversight_with_budget(
                 logger=logger,
                 budget_state=state,
@@ -602,7 +600,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             max_steps_hit=phase_stop_reason == "max_steps_exhausted",
         )
         state.finish()
-        if logger is not None and oversight_active:
+        if logger is not None and oversight_runs_any_hook:
             await logger.log_event(
                 "oversight_run_summary",
                 {
@@ -709,7 +707,11 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             parse_warnings = _collect_tool_call_parse_warnings(assistant_message)
             assistant_payload = _assistant_message_to_dict(assistant_message, calls)
 
-            if calls and _adaptive_shopping_oversight_active(state, system_config):
+            if calls and _oversight_active_for_hook(
+                state=state,
+                system_config=system_config,
+                hook="pre_tool",
+            ):
                 pre_tool_action = await _evaluate_oversight_with_budget(
                     logger=logger,
                     budget_state=state,
@@ -739,6 +741,15 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                             system_config=system_config,
                         )
 
+                    max_streak = int(
+                        getattr(system_config, "max_consecutive_pre_tool_blocks", 5)
+                    )
+                    streak_cap_tripped = (
+                        h1_outcome == H1Outcome.FORCED_APPROVE
+                        and max_streak > 0
+                        and state.consecutive_pre_tool_blocks >= max_streak
+                        and pre_tool_action.intervention_type == "provide_guidance"
+                    )
                     pre_tool_action.h1_outcome = h1_outcome.value
                     if h1_outcome == H1Outcome.HARD_BLOCK:
                         pre_tool_action.block_current_tool = True
@@ -754,12 +765,41 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                             ),
                         )
                         pre_tool_action.blocked_mutation_repeat_count = repeat_count
+                        state.consecutive_pre_tool_blocks += 1
                     elif h1_outcome == H1Outcome.FORCED_APPROVE:
                         pre_tool_action.block_current_tool = False
-                        pre_tool_action.intervention_type = "overseer_override_forced"
+                        if streak_cap_tripped:
+                            pre_tool_action.intervention_type = (
+                                "overseer_override_streak_cap"
+                            )
+                            if logger is not None:
+                                await logger.log_event(
+                                    "overseer_streak_cap_fired",
+                                    {
+                                        "domain": "shopping",
+                                        "task_id": state.task_id,
+                                        "run_id": run_id,
+                                        "phase": phase_name,
+                                        "step_index": step_count,
+                                        "streak_length": (
+                                            state.consecutive_pre_tool_blocks
+                                        ),
+                                        "blocked_tool_name": (
+                                            pre_tool_action.blocked_tool_name
+                                        ),
+                                        "blocked_tool_arguments_normalized": (
+                                            pre_tool_action.blocked_tool_arguments_normalized
+                                        ),
+                                    },
+                                )
+                        else:
+                            pre_tool_action.intervention_type = (
+                                "overseer_override_forced"
+                            )
                         pre_tool_action.notice_text = None
                         pre_tool_action.notice_rendered = False
                         pre_tool_action.notice_source = None
+                        state.consecutive_pre_tool_blocks = 0
                     elif h1_outcome == H1Outcome.APPROVE_WITH_NUDGE:
                         pre_tool_action.block_current_tool = False
                     else:
@@ -823,8 +863,10 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
 
             tool_results: list[dict[str, Any]] = []
             if not calls:
-                if phase_name == "cart_check" and _adaptive_shopping_oversight_active(
-                    state, system_config
+                if phase_name == "cart_check" and _oversight_active_for_hook(
+                    state=state,
+                    system_config=system_config,
+                    hook="final",
                 ):
                     final_action = await _evaluate_oversight_with_budget(
                         logger=logger,
@@ -969,6 +1011,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     tool_index=tool_index,
                     mutating_tools=tuple(system_config.mutating_tools),
                 )
+                state.consecutive_pre_tool_blocks = 0
                 tool_results.append(
                     {
                         "tool_name": call["name"],
@@ -976,8 +1019,10 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         "content": tool_result,
                     }
                 )
-                if not turn_has_pending_notice and _adaptive_shopping_oversight_active(
-                    state, system_config
+                if not turn_has_pending_notice and _oversight_active_for_hook(
+                    state=state,
+                    system_config=system_config,
+                    hook="post_tool",
                 ):
                     post_tool_action = await _evaluate_oversight_with_budget(
                         logger=logger,

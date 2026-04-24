@@ -6,5 +6,6 @@ overseer_prompt_version: c2-lite-v1.3
 irreversible_tools: []
 block_on_mutation_mode: auto
 max_hard_blocks_per_args: 2
+max_consecutive_pre_tool_blocks: 5
 require_cited_violation_for_block: true
-overseer_call_budget_per_task: 8
+overseer_call_budget_per_task: 1000

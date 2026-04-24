@@ -35,6 +35,7 @@ class SystemConfig:
     irreversible_tools: tuple[str, ...] = ()
     block_on_mutation_mode: str = "auto"
     max_hard_blocks_per_args: int = 2
+    max_consecutive_pre_tool_blocks: int = 5
     require_cited_violation_for_block: bool = True
     overseer_call_budget_per_task: int = 8
 
@@ -154,6 +155,9 @@ def build_system_config(
         ),
         block_on_mutation_mode=str(defaults.get("block_on_mutation_mode", "auto")),
         max_hard_blocks_per_args=int(defaults.get("max_hard_blocks_per_args", 2)),
+        max_consecutive_pre_tool_blocks=int(
+            defaults.get("max_consecutive_pre_tool_blocks", 5)
+        ),
         require_cited_violation_for_block=bool(
             defaults.get("require_cited_violation_for_block", True)
         ),
