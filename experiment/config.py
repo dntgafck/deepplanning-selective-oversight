@@ -48,8 +48,7 @@ def provider_identity_payload(
         return None
     resolved_reasoning_enabled = reasoning_enabled
     if resolved_reasoning_enabled is None:
-        reasoning_config = provider.extra_body.get("reasoning") or {}
-        resolved_reasoning_enabled = reasoning_config.get("enabled")
+        resolved_reasoning_enabled = provider.configured_reasoning_enabled()
     return {
         "requested_model": provider.alias,
         "resolved_provider": provider.provider,
@@ -99,7 +98,7 @@ def system_config_with_seed_override(
 def build_system_config(
     system_name: str,
     executor_model: str,
-    overseer_model: str = "deepseek-v3.2",
+    overseer_model: str = "deepseek-v4-flash",
     max_steps: int = 400,
     num_runs: int = 1,
 ) -> SystemConfig:

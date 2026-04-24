@@ -119,7 +119,7 @@ def prepare_run_inputs(
 def run(
     *,
     models: str | list[str] | None = None,
-    overseer_model: str = "deepseek-v3.2",
+    overseer_model: str = "deepseek-v4-flash",
     levels: int | str | list[int] | list[str] | None = None,
     sample_ids: int | str | list[int] | list[str] | None = None,
     system: str = "A",

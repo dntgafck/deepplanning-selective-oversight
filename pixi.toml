@@ -9,6 +9,7 @@ version = "0.1.0"
 lint-all = "pre-commit run --all-files"
 test = "pytest"
 deepplanning-experiment = "python scripts/run_experiment.py"
+model-chat = "python scripts/run_model_completion.py"
 
 [dependencies]
 # Core runtime

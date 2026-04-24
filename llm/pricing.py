@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-
 _MISSING = object()
 
 
@@ -81,9 +80,7 @@ def extract_usage_breakdown(response: Any) -> UsageBreakdown:
         prompt_cache_hit_tokens = cached_prompt_tokens
 
     if prompt_tokens > 0:
-        accounted_prompt_tokens = (
-            prompt_cache_hit_tokens + prompt_cache_miss_tokens
-        )
+        accounted_prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens
         if accounted_prompt_tokens < prompt_tokens:
             prompt_cache_miss_tokens += prompt_tokens - accounted_prompt_tokens
         elif accounted_prompt_tokens > prompt_tokens:
@@ -142,10 +139,9 @@ def cached_input_output_v1(
         return None
 
     usage = extract_usage_breakdown(response)
-    input_usd = (
-        (usage.prompt_cache_hit_tokens / 1_000_000) * cache_hit_price
-        + (usage.prompt_cache_miss_tokens / 1_000_000) * cache_miss_price
-    )
+    input_usd = (usage.prompt_cache_hit_tokens / 1_000_000) * cache_hit_price + (
+        usage.prompt_cache_miss_tokens / 1_000_000
+    ) * cache_miss_price
     output_usd = (usage.completion_tokens / 1_000_000) * output_price
     return PricingBreakdown(
         total_usd=input_usd + output_usd,

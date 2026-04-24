@@ -2260,7 +2260,7 @@ def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(
     def fake_build_system_config(
         system_name: str,
         executor_model: str,
-        overseer_model: str = "deepseek-v3.2",
+        overseer_model: str = "deepseek-v4-flash",
         max_steps: int = 400,
         num_runs: int = 1,
     ):
@@ -2370,7 +2370,7 @@ def test_shopping_run_agent_inference_applies_per_run_seed_override(
 
     results = shopping_module.run_agent_inference(
         model="qwen3.5-9b",
-        overseer_model="deepseek-v3.2",
+        overseer_model="deepseek-v4-flash",
         test_data_path=test_data_path,
         database_dir=database_dir_by_run[0],
         tool_schema_path=SHOPPING_SCHEMA_PATH,
@@ -2931,7 +2931,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
     cfg = OmegaConf.create(
         {
             "domains": ["travel", "shopping"],
-            "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
+            "models": {"executor": "qwen3-14b", "overseer": "deepseek-v4-flash"},
             "system": {"name": "A"},
             "runtime": {"workers": 1, "max_llm_calls": 20, "runs": 4},
             "shopping": {"levels": [1], "sample_ids": ["0"]},
@@ -2952,7 +2952,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
         {
             "output_root": Path("/tmp") / "bench-session" / "shopping",
             "langfuse_session_id": "bench-session",
-            "overseer_model": "deepseek-v3.2",
+            "overseer_model": "deepseek-v4-flash",
         }
     ]
     assert travel_calls == [
@@ -2987,7 +2987,7 @@ def test_run_experiment_loads_named_config_and_writes_session_metadata(
             {
                 "name": "system-a-proof",
                 "domains": ["travel", "shopping"],
-                "models": {"executor": "qwen3-14b", "overseer": "deepseek-v3.2"},
+                "models": {"executor": "qwen3-14b", "overseer": "deepseek-v4-flash"},
                 "system": {"name": "A"},
                 "runtime": {"workers": 2, "max_llm_calls": 15, "runs": 3},
                 "shopping": {"levels": [1], "sample_ids": ["1"]},

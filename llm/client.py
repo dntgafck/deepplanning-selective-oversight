@@ -47,13 +47,44 @@ def _merge_reasoning(
     if reasoning_enabled is None:
         return merged
 
-    reasoning = dict(merged.get("reasoning") or {})
-    reasoning["enabled"] = reasoning_enabled
-    merged["reasoning"] = reasoning
-    chat_template_kwargs = dict(merged.get("chat_template_kwargs") or {})
-    chat_template_kwargs["thinking"] = reasoning_enabled
-    merged["chat_template_kwargs"] = chat_template_kwargs
+    updated = False
+    if "reasoning" in merged:
+        reasoning = dict(merged.get("reasoning") or {})
+        reasoning["enabled"] = reasoning_enabled
+        merged["reasoning"] = reasoning
+        updated = True
+    if "chat_template_kwargs" in merged:
+        chat_template_kwargs = dict(merged.get("chat_template_kwargs") or {})
+        chat_template_kwargs["thinking"] = reasoning_enabled
+        merged["chat_template_kwargs"] = chat_template_kwargs
+        updated = True
+    if "thinking" in merged:
+        thinking = dict(merged.get("thinking") or {})
+        thinking["type"] = "enabled" if reasoning_enabled else "disabled"
+        merged["thinking"] = thinking
+        updated = True
+    if not updated:
+        merged["reasoning"] = {"enabled": reasoning_enabled}
     return merged
+
+
+def _configured_reasoning_enabled(extra_body: dict[str, Any]) -> bool | None:
+    thinking = dict(extra_body.get("thinking") or {})
+    thinking_type = str(thinking.get("type", "")).strip().lower()
+    if thinking_type == "enabled":
+        return True
+    if thinking_type == "disabled":
+        return False
+
+    reasoning = dict(extra_body.get("reasoning") or {})
+    if reasoning.get("enabled") is not None:
+        return bool(reasoning["enabled"])
+
+    chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+    if chat_template_kwargs.get("thinking") is not None:
+        return bool(chat_template_kwargs["thinking"])
+
+    return None
 
 
 @dataclass(slots=True)
@@ -77,7 +108,11 @@ class ProviderConfig:
     max_retries: int = 1
     backoff: float = 1.0
     pricing: PricingConfig = field(default_factory=PricingConfig)
+    request_params: dict[str, Any] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
+
+    def configured_reasoning_enabled(self) -> bool | None:
+        return _configured_reasoning_enabled(self.extra_body)
 
     @classmethod
     def from_model_name(cls, model_name: str) -> "ProviderConfig":
@@ -124,7 +159,8 @@ class ProviderConfig:
             max_retries=max(int(config.get("max_retries", 1)), 1),
             backoff=float(config.get("backoff", 1.0)),
             pricing=pricing,
-            extra_body=dict(config.get("extra_body") or {}),
+            request_params=copy.deepcopy(dict(config.get("request_params") or {})),
+            extra_body=copy.deepcopy(dict(config.get("extra_body") or {})),
         )
 
 
@@ -251,6 +287,8 @@ async def call_chat_completion(
     }
     if tools:
         params["tools"] = tools
+    if provider.request_params:
+        params.update(copy.deepcopy(provider.request_params))
     if provider.temperature is not None:
         params["temperature"] = provider.temperature
     if provider.top_p is not None:

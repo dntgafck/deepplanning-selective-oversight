@@ -13,7 +13,7 @@
   explicitly requires it.
 - Root wrapper CLIs use the canonical Hydra config tree under `configs/`. Prefer
   Hydra-style overrides such as `experiment=system_a_smoke`,
-  `models.executor=qwen-plus`, or `travel.language=en`. The older direct
+  `models.executor=qwen3.5-9b`, or `travel.language=en`. The older direct
   benchmark/domain scripts are compatibility wrappers, not the documented public
   interface.
 
@@ -30,11 +30,11 @@
 - Focused benchmark runs use the root wrappers so data and outputs stay outside
   the submodule:
 - Shopping only:
-  `pixi run deepplanning-experiment -- name=shopping-only domains=[shopping] models.executor=qwen-plus`
+  `pixi run deepplanning-experiment -- name=shopping-only domains=[shopping] models.executor=qwen3.5-9b`
 - Travel only:
-  `pixi run deepplanning-experiment -- name=travel-only domains=[travel] models.executor=qwen-plus`
+  `pixi run deepplanning-experiment -- name=travel-only domains=[travel] models.executor=qwen3.5-9b`
 - Unified runner:
-  `pixi run deepplanning-experiment -- name=travel-shopping domains=[travel,shopping] models.executor=qwen-plus`
+  `pixi run deepplanning-experiment -- name=travel-shopping domains=[travel,shopping] models.executor=qwen3.5-9b`
 - Travel control knobs map to Hydra overrides such as `travel.language`,
   `travel.start_from`, and `session_root`.
 

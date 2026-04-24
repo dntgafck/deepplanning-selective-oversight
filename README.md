@@ -98,9 +98,12 @@ result — then execution resumes.
 ## Models and infrastructure
 
 Configured wrapper models use provider-specific OpenAI-compatible endpoints:
-Together.ai for `qwen3.5-9b`, the DeepSeek direct API for `deepseek-v3.2`, and
-Alibaba DashScope for the `qwen-plus` compatibility model that is still used by
-the vendored travel conversion flow.
+Together.ai for `qwen3.5-9b` and the DeepSeek direct API for
+`deepseek-v4-flash`.
+
+The `qwen-plus` alias remains in `configs/models.yaml` only as a compatibility
+shim for vendored travel conversion code that still requests that name. In the
+root wrapper, that alias is routed to the DeepSeek API rather than DashScope.
 
 ### Sampling configuration
 
@@ -116,8 +119,6 @@ Provider seed support status checked against provider docs on April 22, 2026:
 
 - Together.ai: the chat-completions docs list `seed` as a supported request
   parameter.
-- Alibaba DashScope: the OpenAI-compatible chat docs list `seed` as a supported
-  request parameter.
 - DeepSeek direct API: the current chat-completions docs do not document `seed`,
   so this repo sends it as a best-effort top-level parameter and logs the
   requested value for every run.
@@ -142,12 +143,24 @@ pixi run dvc repro deepplanning_data
 pixi run deepplanning-experiment -- experiment=system_a_smoke
 ```
 
+One-shot model smoke test:
+
+```bash
+pixi run model-chat -- qwen3.5-9b
+pixi run model-chat -- qwen3.5-9b "Explain recursion in one sentence."
+```
+
+The first argument to `model-chat` must match a model alias declared in
+`configs/models.yaml`. The command sends a single chat completion request using
+that provider config and prints the full response JSON returned by the client.
+If no prompt is passed, a built-in smoke prompt is used.
+
 Override examples:
 
 ```bash
 pixi run deepplanning-experiment -- experiment=system_a_smoke name=my-smoke
 pixi run deepplanning-experiment -- name=travel-c2 domains=[travel] system=C2 travel.language=en
-pixi run deepplanning-experiment -- name=shop-ablation domains=[shopping] shopping.levels=[1,2] models.executor=qwen-plus
+pixi run deepplanning-experiment -- name=shop-ablation domains=[shopping] shopping.levels=[1,2] models.executor=qwen3.5-9b
 ```
 
 Each experiment session writes a timestamped directory under

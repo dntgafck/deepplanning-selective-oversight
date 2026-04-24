@@ -378,6 +378,72 @@ def test_call_chat_completion_omits_seed_when_none(monkeypatch):
     assert "seed" not in captured_params[0]
 
 
+def test_call_chat_completion_forwards_request_params_when_set(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=llm_client.ProviderConfig(
+                alias="deepseek-v4-flash",
+                model="deepseek-v4-flash",
+                request_params={
+                    "reasoning_effort": "high",
+                    "presence_penalty": 0.3,
+                },
+            ),
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert captured_params[0]["reasoning_effort"] == "high"
+    assert captured_params[0]["presence_penalty"] == 0.3
+
+
+def test_call_chat_completion_typed_fields_override_request_params(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=llm_client.ProviderConfig(
+                alias="alias",
+                model="openai/o3",
+                temperature=0.2,
+                seed=42,
+                request_params={
+                    "temperature": 0.7,
+                    "seed": 7,
+                    "reasoning_effort": "high",
+                },
+            ),
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert captured_params[0]["temperature"] == 0.2
+    assert captured_params[0]["seed"] == 42
+    assert captured_params[0]["reasoning_effort"] == "high"
+
+
 def test_call_chat_completion_preserves_model_config_reasoning_when_unset(
     monkeypatch,
 ):
@@ -412,6 +478,37 @@ def test_call_chat_completion_preserves_model_config_reasoning_when_unset(
     }
 
 
+def test_call_chat_completion_overrides_legacy_chat_template_thinking(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+    provider = llm_client.ProviderConfig(
+        alias="alias",
+        model="legacy-model",
+        extra_body={"chat_template_kwargs": {"thinking": True}},
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=provider,
+            messages=[{"role": "user", "content": "hello"}],
+            reasoning_enabled=False,
+        )
+    )
+
+    assert captured_params[0]["extra_body"] == {
+        "chat_template_kwargs": {"thinking": False},
+    }
+
+
 def test_provider_config_from_model_name_loads_logprobs_for_qwen():
     provider = llm_client.ProviderConfig.from_model_name("qwen3.5-9b")
 
@@ -427,17 +524,30 @@ def test_provider_config_from_model_name_loads_logprobs_for_qwen():
     }
 
 
+def test_provider_config_from_model_name_keeps_qwen_plus_as_deepseek_compat_alias():
+    provider = llm_client.ProviderConfig.from_model_name("qwen-plus")
+
+    assert provider.model == "deepseek-v4-flash"
+    assert provider.api_base == "https://api.deepseek.com"
+    assert provider.api_key_env == "DEEPSEEK_API_KEY"
+    assert provider.request_params == {}
+    assert provider.extra_body == {"thinking": {"type": "disabled"}}
+    assert provider.pricing.calculator == "cached_input_output_v1"
+
+
 def test_provider_config_from_model_name_loads_cached_pricing_for_deepseek():
-    provider = llm_client.ProviderConfig.from_model_name("deepseek-v3.2")
+    provider = llm_client.ProviderConfig.from_model_name("deepseek-v4-flash")
 
     assert provider.temperature == 0.0
     assert provider.top_p == 1.0
     assert provider.seed == 42
+    assert provider.request_params == {"reasoning_effort": "high"}
+    assert provider.extra_body == {"thinking": {"type": "enabled"}}
     assert provider.pricing.calculator == "cached_input_output_v1"
     assert provider.pricing.prices == {
         "input_cache_hit_per_million_usd": 0.028,
-        "input_cache_miss_per_million_usd": 0.28,
-        "output_per_million_usd": 0.42,
+        "input_cache_miss_per_million_usd": 0.14,
+        "output_per_million_usd": 0.28,
     }
 
 
@@ -453,6 +563,10 @@ def test_provider_config_from_model_name_loads_new_fields(monkeypatch):
             "temperature": 0.0,
             "top_p": 0.8,
             "seed": 123,
+            "request_params": {
+                "reasoning_effort": "max",
+                "response_format": {"type": "json_object"},
+            },
         },
     )
 
@@ -466,6 +580,20 @@ def test_provider_config_from_model_name_loads_new_fields(monkeypatch):
     assert provider.temperature == 0.0
     assert provider.top_p == 0.8
     assert provider.seed == 123
+    assert provider.request_params == {
+        "reasoning_effort": "max",
+        "response_format": {"type": "json_object"},
+    }
+
+
+def test_provider_config_configured_reasoning_enabled_supports_deepseek_thinking():
+    provider = llm_client.ProviderConfig(
+        alias="deepseek-v4-flash",
+        model="deepseek-v4-flash",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+
+    assert provider.configured_reasoning_enabled() is True
 
 
 def test_estimate_call_cost_uses_flat_pricing_config():
@@ -493,14 +621,14 @@ def test_estimate_call_cost_uses_flat_pricing_config():
 
 def test_estimate_call_cost_uses_cached_pricing_config():
     provider = llm_client.ProviderConfig(
-        alias="deepseek-v3.2",
-        model="deepseek-reasoner",
+        alias="deepseek-v4-flash",
+        model="deepseek-v4-flash",
         pricing=llm_client.PricingConfig(
             calculator="cached_input_output_v1",
             prices={
                 "input_cache_hit_per_million_usd": 0.028,
-                "input_cache_miss_per_million_usd": 0.28,
-                "output_per_million_usd": 0.42,
+                "input_cache_miss_per_million_usd": 0.14,
+                "output_per_million_usd": 0.28,
             },
         ),
     )
@@ -514,19 +642,19 @@ def test_estimate_call_cost_uses_cached_pricing_config():
 
     cost = llm_client.estimate_call_cost(response=response, provider=provider)
 
-    assert cost == pytest.approx(0.000106288)
+    assert cost == pytest.approx(0.000093688)
 
 
 def test_estimate_call_cost_infers_cache_miss_tokens_from_cached_details():
     provider = llm_client.ProviderConfig(
-        alias="deepseek-v3.2",
-        model="deepseek-reasoner",
+        alias="deepseek-v4-flash",
+        model="deepseek-v4-flash",
         pricing=llm_client.PricingConfig(
             calculator="cached_input_output_v1",
             prices={
                 "input_cache_hit_per_million_usd": 0.028,
-                "input_cache_miss_per_million_usd": 0.28,
-                "output_per_million_usd": 0.42,
+                "input_cache_miss_per_million_usd": 0.14,
+                "output_per_million_usd": 0.28,
             },
         ),
     )
@@ -542,7 +670,7 @@ def test_estimate_call_cost_infers_cache_miss_tokens_from_cached_details():
     assert pricing is not None
     assert pricing.prompt_cache_hit_tokens == 150
     assert pricing.prompt_cache_miss_tokens == 50
-    assert pricing.total_usd == pytest.approx(0.0000392)
+    assert pricing.total_usd == pytest.approx(0.0000252)
 
 
 def test_call_chat_completion_forwards_logprobs_from_model_config(monkeypatch):

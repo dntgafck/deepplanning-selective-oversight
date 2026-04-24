@@ -15,4 +15,4 @@ domains:
   - shopping
 models:
   executor: qwen3.5-9b
-  overseer: deepseek-v3.2
+  overseer: deepseek-v4-flash

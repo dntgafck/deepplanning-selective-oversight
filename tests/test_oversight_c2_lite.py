@@ -111,7 +111,7 @@ def _execution_contract() -> ExecutionContract:
             "verification_tools": ["get_cart_info"],
         },
         final_output_requirements=["Use the authoritative cart state."],
-        compiler_signature="overseer=deepseek-v3.2|mode=thinking|prompt=c2-lite-v1.2",
+        compiler_signature="overseer=deepseek-v4-flash|mode=thinking|prompt=c2-lite-v1.2",
     )
 
 
@@ -166,7 +166,7 @@ def _task_checklist() -> TaskChecklist:
         ],
         final_verification_only_keys=["final:fresh-cart"],
         ambiguities=[],
-        compiler_signature="overseer=deepseek-v3.2|mode=thinking|prompt=c2-lite-v1.2",
+        compiler_signature="overseer=deepseek-v4-flash|mode=thinking|prompt=c2-lite-v1.2",
     )
 
 
@@ -1359,25 +1359,25 @@ def test_cache_keys_differ_between_thinking_and_non_thinking_compilers():
         domain="shopping",
         executor_system_prompt="prompt",
         tool_schema=[{"type": "function"}],
-        compiler_signature="overseer=deepseek-v3.2|mode=thinking|prompt=c2-lite-v1.2",
+        compiler_signature="overseer=deepseek-v4-flash|mode=thinking|prompt=c2-lite-v1.2",
     )
     contract_key_non_thinking = make_contract_cache_key(
         domain="shopping",
         executor_system_prompt="prompt",
         tool_schema=[{"type": "function"}],
-        compiler_signature="overseer=deepseek-v3.2|mode=non-thinking|prompt=c2-lite-v1.2",
+        compiler_signature="overseer=deepseek-v4-flash|mode=non-thinking|prompt=c2-lite-v1.2",
     )
     checklist_key_thinking = make_checklist_cache_key(
         task_id="1",
         task_query="buy laptop",
         contract_id="contract-shopping",
-        compiler_signature="overseer=deepseek-v3.2|mode=thinking|prompt=c2-lite-v1.2",
+        compiler_signature="overseer=deepseek-v4-flash|mode=thinking|prompt=c2-lite-v1.2",
     )
     checklist_key_non_thinking = make_checklist_cache_key(
         task_id="1",
         task_query="buy laptop",
         contract_id="contract-shopping",
-        compiler_signature="overseer=deepseek-v3.2|mode=non-thinking|prompt=c2-lite-v1.2",
+        compiler_signature="overseer=deepseek-v4-flash|mode=non-thinking|prompt=c2-lite-v1.2",
     )
 
     assert contract_key_thinking != contract_key_non_thinking
@@ -1397,10 +1397,11 @@ def test_call_chat_completion_overrides_deepseek_thinking_flag(monkeypatch):
         lambda provider, api_key: FakeAsyncClient(fake_create),
     )
     provider = llm_client.ProviderConfig(
-        alias="deepseek-v3.2",
-        model="deepseek-ai/deepseek-v3.2",
+        alias="deepseek-v4-flash",
+        model="deepseek-v4-flash",
         provider="openai",
-        extra_body={"chat_template_kwargs": {"thinking": True}},
+        request_params={"reasoning_effort": "high"},
+        extra_body={"thinking": {"type": "enabled"}},
     )
 
     asyncio.run(
@@ -1411,5 +1412,5 @@ def test_call_chat_completion_overrides_deepseek_thinking_flag(monkeypatch):
         )
     )
 
-    assert captured_params[0]["extra_body"]["reasoning"]["enabled"] is False
-    assert captured_params[0]["extra_body"]["chat_template_kwargs"]["thinking"] is False
+    assert captured_params[0]["reasoning_effort"] == "high"
+    assert captured_params[0]["extra_body"]["thinking"]["type"] == "disabled"

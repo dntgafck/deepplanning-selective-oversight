@@ -268,7 +268,7 @@ def _overseer_model(cfg: Any) -> str:
         if OmegaConf.is_config(cfg.models.overseer)
         else cfg.models.overseer
     )
-    return str(value or "deepseek-v3.2")
+    return str(value or "deepseek-v4-flash")
 
 
 def _domain_names(cfg: Any) -> list[str]:
