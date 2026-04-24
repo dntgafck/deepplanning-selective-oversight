@@ -1225,7 +1225,7 @@ def test_repeated_hard_blocks_force_approval_in_always_mode(monkeypatch, tmp_pat
     assert state.final_output_present is True
     assert state.max_steps_hit is False
     assert state.blocked_mutation_count == 2
-    assert len(captured_calls) == 8
+    assert len(captured_calls) == 6
     records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
     oversight_steps = [
         record
@@ -1823,9 +1823,21 @@ def test_shopping_run_agent_inference_logs_custom_overseer_identity_under_output
     assert task_results[0]["model_identities"]["executor"]["requested_model"] == (
         "qwen3.5-9b"
     )
+    assert task_results[0]["model_identities"]["executor"]["sampling"] == {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "seed": 42,
+        "reasoning_enabled": False,
+    }
     assert task_results[0]["model_identities"]["overseer"]["requested_model"] == (
         "qwen-plus"
     )
+    assert task_results[0]["model_identities"]["overseer"]["sampling"] == {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "seed": 42,
+        "reasoning_enabled": True,
+    }
     artifact_events = [
         record
         for record in _load_jsonl(output_dir / "agent_events.jsonl")
@@ -1836,6 +1848,7 @@ def test_shopping_run_agent_inference_logs_custom_overseer_identity_under_output
         "qwen-plus"
     )
     assert artifact_events[0]["model_identities"]["overseer"]["resolved_model"]
+    assert artifact_events[0]["model_identities"]["overseer"]["sampling"]["seed"] == 42
 
 
 def test_shopping_run_agent_inference_logs_under_output_dir(monkeypatch, tmp_path):
@@ -2305,6 +2318,77 @@ def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(
         "max_steps": 7,
         "num_runs": 2,
     }
+
+
+def test_shopping_run_agent_inference_applies_per_run_seed_override(
+    monkeypatch, tmp_path
+):
+    test_data_path = tmp_path / "shopping_samples.json"
+    test_data_path.write_text(
+        json.dumps([{"id": 1, "query": "test shopping query", "level": 1}]),
+        encoding="utf-8",
+    )
+    captured_seeds: dict[int, tuple[int | None, int | None]] = {}
+
+    class FakeShoppingRunner:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run_task(self, **kwargs):
+            state = kwargs["state"]
+            run_id = kwargs["run_id"]
+            system_config = kwargs["system_config"]
+            captured_seeds[run_id] = (
+                system_config.executor_provider.seed,
+                (
+                    None
+                    if system_config.overseer_provider is None
+                    else system_config.overseer_provider.seed
+                ),
+            )
+            state.begin()
+            state.record_final_outcome(
+                stop_reason="no_tool_calls",
+                output=f"run-{run_id}",
+                max_steps_hit=False,
+            )
+            state.finish()
+            return shopping_module.TaskResult(
+                task_id=state.task_id,
+                run_id=run_id,
+                output=f"run-{run_id}",
+                messages=[],
+                state=state,
+            )
+
+    monkeypatch.setattr(shopping_module, "ShoppingAgentRunner", FakeShoppingRunner)
+    database_dir_by_run = {
+        run_id: tmp_path / f"shopping_db_run_{run_id}" for run_id in range(4)
+    }
+    for path in database_dir_by_run.values():
+        path.mkdir(parents=True)
+
+    results = shopping_module.run_agent_inference(
+        model="qwen3.5-9b",
+        overseer_model="deepseek-v3.2",
+        test_data_path=test_data_path,
+        database_dir=database_dir_by_run[0],
+        tool_schema_path=SHOPPING_SCHEMA_PATH,
+        system_prompt="prompt",
+        output_dir=tmp_path / "shopping_output",
+        workers=1,
+        max_llm_calls=1,
+        runs=4,
+        infra_retry_limit=0,
+        system="C2",
+        database_dir_by_run=database_dir_by_run,
+        per_run_seed_by_run={0: 42, 1: 43, 2: 44, 3: 45},
+        shared_oversight_cache_root=tmp_path / "cache",
+    )
+
+    assert results["success"] == 4
+    assert captured_seeds[0] == (42, 42)
+    assert captured_seeds[3] == (45, 45)
 
 
 def test_travel_run_agent_inference_isolates_multi_run_outputs(monkeypatch, tmp_path):
@@ -3119,10 +3203,12 @@ def test_travel_wrapper_converts_and_evaluates_each_run(monkeypatch, tmp_path):
         cfg=cfg,
         convert_report=FakeConvert,
         eval_converted=FakeEval,
+        base_seed=42,
     )
 
     assert inference_calls[0]["runs"] == 2
     assert sorted(inference_calls[0]["output_dir_by_run"]) == [0, 1]
+    assert inference_calls[0]["per_run_seed_by_run"] == {0: 42, 1: 43}
     assert conversion_dirs == [
         tmp_path / "travel_output" / "qwen3-14b_en" / "run_0",
         tmp_path / "travel_output" / "qwen3-14b_en" / "run_1",
@@ -3307,7 +3393,11 @@ def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
         "import_modules",
         lambda: (object(), object()),
     )
-    monkeypatch.setattr(shopping_runtime_module, "load_model_config", lambda model: {})
+    monkeypatch.setattr(
+        shopping_runtime_module,
+        "load_model_config",
+        lambda model: {"seed": 42},
+    )
 
     prepared_databases: list[Path] = []
 
@@ -3355,6 +3445,7 @@ def test_shopping_wrapper_creates_isolated_run_layouts(monkeypatch, tmp_path):
     assert inference_calls[0]["runs"] == 2
     assert sorted(inference_calls[0]["database_dir_by_run"]) == [0, 1]
     assert sorted(inference_calls[0]["output_dir_by_run"]) == [0, 1]
+    assert inference_calls[0]["per_run_seed_by_run"] == {0: 42, 1: 43}
     assert prepared_databases[0] != prepared_databases[1]
     assert all(
         f"run_{run_id}" in str(path) for run_id, path in enumerate(prepared_databases)

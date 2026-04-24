@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from deepplanning.config import available_system_names, load_system_defaults
@@ -41,21 +41,59 @@ class SystemConfig:
 
 def provider_identity_payload(
     provider: ProviderConfig | None,
+    *,
+    reasoning_enabled: bool | None = None,
 ) -> dict[str, Any] | None:
     if provider is None:
         return None
+    resolved_reasoning_enabled = reasoning_enabled
+    if resolved_reasoning_enabled is None:
+        reasoning_config = provider.extra_body.get("reasoning") or {}
+        resolved_reasoning_enabled = reasoning_config.get("enabled")
     return {
         "requested_model": provider.alias,
         "resolved_provider": provider.provider,
         "resolved_model": provider.model,
+        "sampling": {
+            "temperature": provider.temperature,
+            "top_p": provider.top_p,
+            "seed": provider.seed,
+            "reasoning_enabled": resolved_reasoning_enabled,
+        },
     }
 
 
 def system_model_identities(system_config: SystemConfig) -> dict[str, Any]:
     return {
         "executor": provider_identity_payload(system_config.executor_provider),
-        "overseer": provider_identity_payload(system_config.overseer_provider),
+        "overseer": provider_identity_payload(
+            system_config.overseer_provider,
+            reasoning_enabled=system_config.overseer_thinking,
+        ),
     }
+
+
+def system_config_with_seed_override(
+    system_config: SystemConfig,
+    seed_override: int | None,
+) -> SystemConfig:
+    if seed_override is None:
+        return system_config
+
+    executor_provider = replace(
+        system_config.executor_provider,
+        seed=int(seed_override),
+    )
+    overseer_provider = (
+        replace(system_config.overseer_provider, seed=int(seed_override))
+        if system_config.overseer_provider is not None
+        else None
+    )
+    return replace(
+        system_config,
+        executor_provider=executor_provider,
+        overseer_provider=overseer_provider,
+    )
 
 
 def build_system_config(

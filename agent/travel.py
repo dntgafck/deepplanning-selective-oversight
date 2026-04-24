@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from experiment import StructuredLogger, build_system_config, run_experiment
+from experiment.config import system_config_with_seed_override, system_model_identities
 from experiment.logging import serialize_exception, serialize_messages
 from experiment.progress import InferenceProgressReporter
 from failure_subtypes import (
@@ -308,6 +309,7 @@ async def run_agent_inference_async(
     rerun_ids: list[int] | None = None,
     system: str = "A",
     output_dir_by_run: dict[int, Path] | None = None,
+    per_run_seed_by_run: dict[int, int] | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
@@ -349,7 +351,7 @@ async def run_agent_inference_async(
     print(f"Execution mode: {progress.execution_mode(workers)}")
     print(f"{'=' * 80}\n")
 
-    system_config = build_system_config(
+    base_system_config = build_system_config(
         system_name=system,
         executor_model=model,
         max_steps=max_llm_calls,
@@ -387,6 +389,11 @@ async def run_agent_inference_async(
         query = str(sample.get("query", ""))
         complexity = int(sample.get("meta_info", {}).get("days", 0) or 0) or None
         logger = get_logger(run_id)
+        run_system_config = system_config_with_seed_override(
+            base_system_config,
+            None if per_run_seed_by_run is None else per_run_seed_by_run.get(run_id),
+        )
+        model_identities = system_model_identities(run_system_config)
         sample_trace_id = trace_id or build_langfuse_trace_id(
             session_id,
             "travel",
@@ -407,7 +414,7 @@ async def run_agent_inference_async(
             try:
                 run_output_dir = resolve_run_output_dir(run_id)
                 runner = TravelAgentRunner(
-                    model=system_config.executor_provider.alias,
+                    model=run_system_config.executor_provider.alias,
                     sample_id=str(sample_id_raw),
                     database_base_path=str(database_dir),
                     tool_schema_path=str(tool_schema_path),
@@ -417,7 +424,7 @@ async def run_agent_inference_async(
                     user_query=query,
                     system_prompt=system_prompt,
                     state=state,
-                    system_config=system_config,
+                    system_config=run_system_config,
                     logger=logger,
                     run_id=run_id,
                     trace_id=sample_trace_id,
@@ -442,6 +449,7 @@ async def run_agent_inference_async(
                     "success": True,
                     "failure_subtype": failure_subtype,
                     "observation_valid": observation_valid,
+                    "model_identities": model_identities,
                 }
                 trajectory_file = run_output_dir / "trajectories" / f"{sample_id}.json"
                 trajectory_file.write_text(
@@ -466,6 +474,7 @@ async def run_agent_inference_async(
                         "failure_subtype": failure_subtype,
                         "observation_valid": observation_valid,
                         "final_output": result.output,
+                        "model_identities": model_identities,
                     }
                 )
                 await progress.record_completion(
@@ -517,6 +526,7 @@ async def run_agent_inference_async(
                         "failure_subtype": failure_subtype,
                         "observation_valid": observation_valid,
                         "error": error_payload,
+                        "model_identities": model_identities,
                     },
                 )
                 await logger.log_result(
@@ -531,6 +541,7 @@ async def run_agent_inference_async(
                         "observation_valid": observation_valid,
                         "final_output": None,
                         "error": error_payload,
+                        "model_identities": model_identities,
                     }
                 )
                 await progress.record_completion(
@@ -547,6 +558,7 @@ async def run_agent_inference_async(
                     "failure_subtype": failure_subtype,
                     "observation_valid": observation_valid,
                     "error": error_payload.get("message", str(exc)),
+                    "model_identities": model_identities,
                 }
 
     raw_results = await run_experiment(
@@ -595,6 +607,7 @@ def run_agent_inference(
     rerun_ids: list[int] | None = None,
     system: str = "A",
     output_dir_by_run: dict[int, Path] | None = None,
+    per_run_seed_by_run: dict[int, int] | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
@@ -614,6 +627,7 @@ def run_agent_inference(
                 rerun_ids=rerun_ids,
                 system=system,
                 output_dir_by_run=output_dir_by_run,
+                per_run_seed_by_run=per_run_seed_by_run,
                 trace_id=trace_id,
                 session_id=session_id,
             )

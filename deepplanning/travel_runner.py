@@ -45,6 +45,15 @@ def import_modules() -> tuple[object, object]:
     return convert_report, eval_converted
 
 
+def _build_per_run_seed_by_run(
+    base_seed: int | None,
+    runs: int,
+) -> dict[int, int] | None:
+    if base_seed is None:
+        return None
+    return {run_id: int(base_seed) + run_id for run_id in range(int(runs))}
+
+
 def prepare_test_data(
     language: str, output_dir: Path, sample_ids: list[str] | None
 ) -> Path:
@@ -321,6 +330,7 @@ def run_language(
     cfg: Any,
     convert_report: object,
     eval_converted: object,
+    base_seed: int | None = None,
     langfuse_session_id: str | None = None,
 ) -> None:
     database_dir = TRAVEL_DATA_ROOT / f"database_{language}"
@@ -373,6 +383,7 @@ def run_language(
             runs=runs,
             system=system,
             output_dir_by_run=run_output_dirs,
+            per_run_seed_by_run=_build_per_run_seed_by_run(base_seed, runs),
             session_id=langfuse_session_id,
         )
         print(
@@ -511,7 +522,7 @@ def run(
     )()
 
     for model in model_names:
-        load_model_config(model)
+        model_config = load_model_config(model)
         for selected_language in languages:
             run_language(
                 model,
@@ -522,5 +533,10 @@ def run(
                 cfg,
                 convert_report,
                 eval_converted,
+                base_seed=(
+                    int(model_config["seed"])
+                    if model_config.get("seed") is not None
+                    else None
+                ),
                 langfuse_session_id=langfuse_session_id,
             )

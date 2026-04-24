@@ -97,9 +97,30 @@ result — then execution resumes.
 
 ## Models and infrastructure
 
-All models are accessed via [OpenRouter](https://openrouter.ai). Each task is
-run four times for robustness (seeds 42–45, temperature 0). Total experimental
-runs: ~4 800 across all systems.
+Configured wrapper models use provider-specific OpenAI-compatible endpoints:
+Together.ai for `qwen3.5-9b`, the DeepSeek direct API for `deepseek-v3.2`, and
+Alibaba DashScope for the `qwen-plus` compatibility model that is still used by
+the vendored travel conversion flow.
+
+### Sampling configuration
+
+All configured models are pinned to `temperature=0.0` and `top_p=1.0`. The base
+`seed` is set per model in `configs/models.yaml` and the runtime wrappers offset
+it by `run_id`, so internal runs `0-3` map to seeds `42-45`.
+
+Seed is best-effort across providers. Even with a fixed seed and
+`temperature=0.0`, batching, kernel non-determinism, and provider routing can
+still change outputs. The four-run protocol absorbs that residual variance.
+
+Provider seed support status checked against provider docs on April 22, 2026:
+
+- Together.ai: the chat-completions docs list `seed` as a supported request
+  parameter.
+- Alibaba DashScope: the OpenAI-compatible chat docs list `seed` as a supported
+  request parameter.
+- DeepSeek direct API: the current chat-completions docs do not document `seed`,
+  so this repo sends it as a best-effort top-level parameter and logs the
+  requested value for every run.
 
 ---
 

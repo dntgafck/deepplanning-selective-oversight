@@ -13,10 +13,23 @@ from llm import client as llm_client
 
 
 class FakeUsage:
-    def __init__(self, prompt_tokens: int, completion_tokens: int) -> None:
+    def __init__(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        *,
+        prompt_cache_hit_tokens: int | None = None,
+        prompt_cache_miss_tokens: int | None = None,
+        prompt_tokens_details: object | None = None,
+        completion_tokens_details: object | None = None,
+    ) -> None:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.total_tokens = prompt_tokens + completion_tokens
+        self.prompt_cache_hit_tokens = prompt_cache_hit_tokens
+        self.prompt_cache_miss_tokens = prompt_cache_miss_tokens
+        self.prompt_tokens_details = prompt_tokens_details
+        self.completion_tokens_details = completion_tokens_details
 
 
 class FakeToolFunction:
@@ -265,6 +278,106 @@ def test_call_chat_completion_forwards_temperature_for_explicit_model_config(
     assert captured_params[0]["temperature"] == 0.2
 
 
+def test_call_chat_completion_omits_temperature_when_unset(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=llm_client.ProviderConfig(alias="alias", model="openai/o3"),
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert "temperature" not in captured_params[0]
+
+
+def test_call_chat_completion_forwards_top_p_when_set(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=llm_client.ProviderConfig(
+                alias="alias",
+                model="openai/o3",
+                top_p=0.9,
+            ),
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert captured_params[0]["top_p"] == 0.9
+
+
+def test_call_chat_completion_forwards_seed_when_set(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=llm_client.ProviderConfig(
+                alias="alias",
+                model="openai/o3",
+                seed=42,
+            ),
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert captured_params[0]["seed"] == 42
+
+
+def test_call_chat_completion_omits_seed_when_none(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=llm_client.ProviderConfig(alias="alias", model="openai/o3"),
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    )
+
+    assert "seed" not in captured_params[0]
+
+
 def test_call_chat_completion_preserves_model_config_reasoning_when_unset(
     monkeypatch,
 ):
@@ -302,8 +415,134 @@ def test_call_chat_completion_preserves_model_config_reasoning_when_unset(
 def test_provider_config_from_model_name_loads_logprobs_for_qwen():
     provider = llm_client.ProviderConfig.from_model_name("qwen3.5-9b")
 
+    assert provider.temperature == 0.0
+    assert provider.top_p == 1.0
+    assert provider.seed == 42
     assert provider.logprobs is True
     assert provider.top_logprobs == 5
+    assert provider.pricing.calculator == "flat_input_output_v1"
+    assert provider.pricing.prices == {
+        "input_per_million_usd": 0.10,
+        "output_per_million_usd": 0.15,
+    }
+
+
+def test_provider_config_from_model_name_loads_cached_pricing_for_deepseek():
+    provider = llm_client.ProviderConfig.from_model_name("deepseek-v3.2")
+
+    assert provider.temperature == 0.0
+    assert provider.top_p == 1.0
+    assert provider.seed == 42
+    assert provider.pricing.calculator == "cached_input_output_v1"
+    assert provider.pricing.prices == {
+        "input_cache_hit_per_million_usd": 0.028,
+        "input_cache_miss_per_million_usd": 0.28,
+        "output_per_million_usd": 0.42,
+    }
+
+
+def test_provider_config_from_model_name_loads_new_fields(monkeypatch):
+    monkeypatch.setattr(
+        llm_client,
+        "load_model_config",
+        lambda model_name: {
+            "model_name": "resolved-model",
+            "model_type": "openai",
+            "base_url": "https://example.invalid/v1",
+            "api_key_env": "TEST_API_KEY",
+            "temperature": 0.0,
+            "top_p": 0.8,
+            "seed": 123,
+        },
+    )
+
+    provider = llm_client.ProviderConfig.from_model_name("alias-name")
+
+    assert provider.alias == "alias-name"
+    assert provider.model == "resolved-model"
+    assert provider.provider == "openai"
+    assert provider.api_base == "https://example.invalid/v1"
+    assert provider.api_key_env == "TEST_API_KEY"
+    assert provider.temperature == 0.0
+    assert provider.top_p == 0.8
+    assert provider.seed == 123
+
+
+def test_estimate_call_cost_uses_flat_pricing_config():
+    provider = llm_client.ProviderConfig(
+        alias="alias",
+        model="test-model",
+        pricing=llm_client.PricingConfig(
+            calculator="flat_input_output_v1",
+            prices={
+                "input_per_million_usd": 0.10,
+                "output_per_million_usd": 0.15,
+            },
+        ),
+    )
+    response = FakeResponse(
+        content="done",
+        prompt_tokens=1_500,
+        completion_tokens=250,
+    )
+
+    cost = llm_client.estimate_call_cost(response=response, provider=provider)
+
+    assert cost == pytest.approx(0.0001875)
+
+
+def test_estimate_call_cost_uses_cached_pricing_config():
+    provider = llm_client.ProviderConfig(
+        alias="deepseek-v3.2",
+        model="deepseek-reasoner",
+        pricing=llm_client.PricingConfig(
+            calculator="cached_input_output_v1",
+            prices={
+                "input_cache_hit_per_million_usd": 0.028,
+                "input_cache_miss_per_million_usd": 0.28,
+                "output_per_million_usd": 0.42,
+            },
+        ),
+    )
+    response = FakeResponse(
+        content="done",
+        prompt_tokens=2_506,
+        completion_tokens=80,
+    )
+    response.usage.prompt_cache_hit_tokens = 2_496
+    response.usage.prompt_cache_miss_tokens = 10
+
+    cost = llm_client.estimate_call_cost(response=response, provider=provider)
+
+    assert cost == pytest.approx(0.000106288)
+
+
+def test_estimate_call_cost_infers_cache_miss_tokens_from_cached_details():
+    provider = llm_client.ProviderConfig(
+        alias="deepseek-v3.2",
+        model="deepseek-reasoner",
+        pricing=llm_client.PricingConfig(
+            calculator="cached_input_output_v1",
+            prices={
+                "input_cache_hit_per_million_usd": 0.028,
+                "input_cache_miss_per_million_usd": 0.28,
+                "output_per_million_usd": 0.42,
+            },
+        ),
+    )
+    response = FakeResponse(
+        content="done",
+        prompt_tokens=200,
+        completion_tokens=50,
+    )
+    response.usage.prompt_tokens_details = SimpleNamespace(cached_tokens=150)
+
+    pricing = llm_client.estimate_call_pricing(response=response, provider=provider)
+
+    assert pricing is not None
+    assert pricing.prompt_cache_hit_tokens == 150
+    assert pricing.prompt_cache_miss_tokens == 50
+    assert pricing.total_usd == pytest.approx(0.0000392)
 
 
 def test_call_chat_completion_forwards_logprobs_from_model_config(monkeypatch):

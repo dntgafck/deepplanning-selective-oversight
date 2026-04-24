@@ -57,6 +57,14 @@ def _serialize_usage(usage: Any) -> dict[str, Any] | None:
         "prompt_tokens": getattr(usage, "prompt_tokens", None),
         "completion_tokens": getattr(usage, "completion_tokens", None),
         "total_tokens": getattr(usage, "total_tokens", None),
+        "prompt_cache_hit_tokens": getattr(usage, "prompt_cache_hit_tokens", None),
+        "prompt_cache_miss_tokens": getattr(usage, "prompt_cache_miss_tokens", None),
+        "prompt_tokens_details": _to_jsonable(
+            getattr(usage, "prompt_tokens_details", None)
+        ),
+        "completion_tokens_details": _to_jsonable(
+            getattr(usage, "completion_tokens_details", None)
+        ),
     }
     return {key: value for key, value in payload.items() if value is not None}
 

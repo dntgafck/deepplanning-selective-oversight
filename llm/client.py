@@ -25,6 +25,11 @@ from failure_subtypes import (
     classify_exception_failure_subtype,
     is_transient_infrastructure_error,
 )
+from llm.pricing import (
+    PricingBreakdown,
+    extract_usage_breakdown,
+    resolve_pricing_calculator,
+)
 
 RetryErrorHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
 LANGFUSE_ID_PART_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -52,6 +57,12 @@ def _merge_reasoning(
 
 
 @dataclass(slots=True)
+class PricingConfig:
+    calculator: str | None = None
+    prices: dict[str, float | None] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ProviderConfig:
     alias: str
     model: str
@@ -59,63 +70,82 @@ class ProviderConfig:
     api_base: str | None = None
     api_key_env: str | None = None
     temperature: float | None = None
+    top_p: float | None = None
+    seed: int | None = None
     logprobs: bool | None = None
     top_logprobs: int | None = None
     max_retries: int = 1
     backoff: float = 1.0
-    input_cost_per_million_usd: float | None = None
-    output_cost_per_million_usd: float | None = None
+    pricing: PricingConfig = field(default_factory=PricingConfig)
     extra_body: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_model_name(cls, model_name: str) -> "ProviderConfig":
         config = load_model_config(model_name)
+        pricing_block = dict(config.get("pricing") or {})
+        pricing = PricingConfig(
+            calculator=pricing_block.get("calculator"),
+            prices={
+                str(key): (float(value) if value is not None else None)
+                for key, value in dict(pricing_block.get("prices") or {}).items()
+            },
+        )
+        if (
+            pricing.calculator is None
+            and config.get("input_cost_per_million_usd") is not None
+            and config.get("output_cost_per_million_usd") is not None
+        ):
+            pricing = PricingConfig(
+                calculator="flat_input_output_v1",
+                prices={
+                    "input_per_million_usd": float(
+                        config["input_cost_per_million_usd"]
+                    ),
+                    "output_per_million_usd": float(
+                        config["output_cost_per_million_usd"]
+                    ),
+                },
+            )
         return cls(
             alias=model_name,
             model=config.get("model_name", model_name),
             provider=config.get("model_type"),
             api_base=config.get("base_url"),
             api_key_env=config.get("api_key_env"),
-            temperature=config.get("temperature"),
+            temperature=(
+                float(config["temperature"])
+                if config.get("temperature") is not None
+                else None
+            ),
+            top_p=float(config["top_p"]) if config.get("top_p") is not None else None,
+            seed=int(config["seed"]) if config.get("seed") is not None else None,
             logprobs=config.get("logprobs"),
             top_logprobs=config.get("top_logprobs"),
             max_retries=max(int(config.get("max_retries", 1)), 1),
             backoff=float(config.get("backoff", 1.0)),
-            input_cost_per_million_usd=(
-                float(config["input_cost_per_million_usd"])
-                if config.get("input_cost_per_million_usd") is not None
-                else None
-            ),
-            output_cost_per_million_usd=(
-                float(config["output_cost_per_million_usd"])
-                if config.get("output_cost_per_million_usd") is not None
-                else None
-            ),
+            pricing=pricing,
             extra_body=dict(config.get("extra_body") or {}),
         )
 
 
 def extract_usage_tokens(response: Any) -> tuple[int, int]:
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return 0, 0
+    usage = extract_usage_breakdown(response)
+    return usage.prompt_tokens, usage.completion_tokens
 
-    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-    return prompt_tokens, completion_tokens
+
+def estimate_call_pricing(
+    *, response: Any, provider: ProviderConfig
+) -> PricingBreakdown | None:
+    if provider.pricing.calculator is None:
+        return None
+
+    calculator = resolve_pricing_calculator(provider.pricing.calculator)
+    return calculator(provider.pricing.prices, response)
 
 
 def estimate_call_cost(*, response: Any, provider: ProviderConfig) -> float | None:
-    if (
-        provider.input_cost_per_million_usd is None
-        or provider.output_cost_per_million_usd is None
-    ):
-        return None
-
-    prompt_tokens, completion_tokens = extract_usage_tokens(response)
-    return (prompt_tokens / 1_000_000) * provider.input_cost_per_million_usd + (
-        completion_tokens / 1_000_000
-    ) * provider.output_cost_per_million_usd
+    pricing = estimate_call_pricing(response=response, provider=provider)
+    return None if pricing is None else pricing.total_usd
 
 
 def _validate_response(response: Any) -> None:
@@ -223,6 +253,10 @@ async def call_chat_completion(
         params["tools"] = tools
     if provider.temperature is not None:
         params["temperature"] = provider.temperature
+    if provider.top_p is not None:
+        params["top_p"] = provider.top_p
+    if provider.seed is not None:
+        params["seed"] = int(provider.seed)
     if provider.logprobs is not None:
         params["logprobs"] = provider.logprobs
     if provider.top_logprobs is not None:

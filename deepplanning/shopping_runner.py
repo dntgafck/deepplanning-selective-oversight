@@ -43,6 +43,15 @@ def import_modules() -> tuple[object, object]:
     return evaluation_pipeline, score_statistics
 
 
+def _build_per_run_seed_by_run(
+    base_seed: int | None,
+    runs: int,
+) -> dict[int, int] | None:
+    if base_seed is None:
+        return None
+    return {run_id: int(base_seed) + run_id for run_id in range(int(runs))}
+
+
 def evaluate_database(
     database_dir: Path, report_dir: Path, evaluation_pipeline: object
 ) -> None:
@@ -133,7 +142,15 @@ def run(
     tool_schema_path = SHOPPING_ROOT / "tools" / "shopping_tool_schema.json"
 
     for model in model_names:
-        load_model_config(model)
+        model_config = load_model_config(model)
+        per_run_seed_by_run = _build_per_run_seed_by_run(
+            (
+                int(model_config["seed"])
+                if model_config.get("seed") is not None
+                else None
+            ),
+            run_count,
+        )
         model_output_root = ensure_directory(output_root_path / model)
 
         for level in level_numbers:
@@ -206,6 +223,7 @@ def run(
                 system=str(system),
                 database_dir_by_run=run_database_dirs,
                 output_dir_by_run=run_output_dirs,
+                per_run_seed_by_run=per_run_seed_by_run,
                 shared_oversight_cache_root=shared_oversight_cache_root,
                 session_id=langfuse_session_id,
             )

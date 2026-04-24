@@ -4,6 +4,9 @@ models:
     model_type: openai
     base_url: https://api.together.xyz/v1
     api_key_env: TOGETHER_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    seed: 42
     logprobs: true
     top_logprobs: 5
     extra_body:
@@ -11,28 +14,39 @@ models:
         enabled: false
     max_retries: 30
     backoff: 1.5
-    input_cost_per_million_usd: 0.10
-    output_cost_per_million_usd: 0.15
+    pricing:
+      calculator: flat_input_output_v1
+      prices:
+        input_per_million_usd: 0.10
+        output_per_million_usd: 0.15
+
+  qwen-plus:
+    model_name: qwen-plus
+    model_type: openai
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    seed: 42
+    max_retries: 30
+    backoff: 1.5
 
   deepseek-v3.2:
     model_name: deepseek-reasoner
     model_type: openai
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    seed: 42
     extra_body:
       reasoning:
         enabled: true
     max_retries: 30
     backoff: 1.5
-    input_cost_per_million_usd: null
-    output_cost_per_million_usd: null
-
-  qwen-plus:
-    model_name: qwen/qwen3-235b-a22b-2507
-    model_type: openai
-    base_url: https://openrouter.ai/api/v1
-    api_key_env: OPENROUTER_API_KEY
-    max_retries: 30
-    backoff: 1.5
-    input_cost_per_million_usd: null
-    output_cost_per_million_usd: null
+    pricing:
+      calculator: cached_input_output_v1
+      prices:
+        input_cache_hit_per_million_usd: 0.028
+        input_cache_miss_per_million_usd: 0.28
+        output_per_million_usd: 0.42

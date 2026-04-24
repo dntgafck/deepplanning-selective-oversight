@@ -11,7 +11,10 @@ from typing import Any
 
 from deepplanning.config import OUTPUT_ROOT
 from experiment import StructuredLogger, build_system_config, run_experiment
-from experiment.config import system_model_identities
+from experiment.config import (
+    system_config_with_seed_override,
+    system_model_identities,
+)
 from experiment.logging import serialize_exception
 from experiment.progress import InferenceProgressReporter
 from failure_subtypes import (
@@ -1073,6 +1076,7 @@ async def run_agent_inference_async(
     system: str = "A",
     database_dir_by_run: dict[int, Path] | None = None,
     output_dir_by_run: dict[int, Path] | None = None,
+    per_run_seed_by_run: dict[int, int] | None = None,
     shared_oversight_cache_root: Path | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
@@ -1115,14 +1119,13 @@ async def run_agent_inference_async(
     print(f"Execution mode: {progress.execution_mode(workers)}")
     print(f"{'=' * 80}\n")
 
-    system_config = build_system_config(
+    base_system_config = build_system_config(
         system_name=system,
         executor_model=model,
         overseer_model=overseer_model,
         max_steps=max_llm_calls,
         num_runs=runs,
     )
-    model_identities = system_model_identities(system_config)
     started_at = time.time()
     loggers: dict[int, StructuredLogger] = {}
 
@@ -1153,6 +1156,11 @@ async def run_agent_inference_async(
         query = str(sample.get("query", ""))
         run_database_dir = resolve_run_database_dir(run_id)
         logger = get_logger(run_id)
+        run_system_config = system_config_with_seed_override(
+            base_system_config,
+            None if per_run_seed_by_run is None else per_run_seed_by_run.get(run_id),
+        )
+        model_identities = system_model_identities(run_system_config)
         sample_trace_id = trace_id or build_langfuse_trace_id(
             session_id,
             "shopping",
@@ -1181,7 +1189,7 @@ async def run_agent_inference_async(
 
                 try:
                     runner = ShoppingAgentRunner(
-                        model=system_config.executor_provider.alias,
+                        model=run_system_config.executor_provider.alias,
                         sample_id=sample_id,
                         database_base_path=str(run_database_dir),
                         tool_schema_path=str(tool_schema_path),
@@ -1190,7 +1198,7 @@ async def run_agent_inference_async(
                         user_query=query,
                         system_prompt=system_prompt,
                         state=state,
-                        system_config=system_config,
+                        system_config=run_system_config,
                         logger=logger,
                         run_id=run_id,
                         save_messages=True,
@@ -1366,6 +1374,7 @@ def run_agent_inference(
     system: str = "A",
     database_dir_by_run: dict[int, Path] | None = None,
     output_dir_by_run: dict[int, Path] | None = None,
+    per_run_seed_by_run: dict[int, int] | None = None,
     shared_oversight_cache_root: Path | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
@@ -1388,6 +1397,7 @@ def run_agent_inference(
                 system=system,
                 database_dir_by_run=database_dir_by_run,
                 output_dir_by_run=output_dir_by_run,
+                per_run_seed_by_run=per_run_seed_by_run,
                 shared_oversight_cache_root=shared_oversight_cache_root,
                 trace_id=trace_id,
                 session_id=session_id,
