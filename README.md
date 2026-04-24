@@ -44,19 +44,25 @@ correctness metric (Case Accuracy) and partial-credit continuous metrics
 ## System configurations
 
 Five configurations are compared in the active root-wrapper protocol. Current
-repo defaults use `Qwen3.5-9B` as the executor and treat Shopping-first runs as
-the primary selective-oversight evaluation surface:
+repo defaults use `Qwen3.5-9B` as the executor, `deepseek-v4-flash` as the
+overseer, and treat Shopping-first runs as the primary selective-oversight
+evaluation surface:
 
-| System | Executor   | Overseer                    | Trigger policy                       |
-| ------ | ---------- | --------------------------- | ------------------------------------ |
-| A      | Qwen3.5-9B | —                           | None — executor-only baseline        |
-| B      | Qwen3.5-9B | DeepSeek-V3.2 (thinking)    | Every step — always-on ceiling       |
-| C1     | Qwen3.5-9B | DeepSeek-V3.2 (thinking)    | Checkpoints only                     |
-| **C2** | Qwen3.5-9B | DeepSeek-V3.2 (thinking)    | Adaptive filter — primary system     |
-| C2-nt  | Qwen3.5-9B | DeepSeek-V3.2 (no thinking) | Adaptive filter — reasoning ablation |
+| System | Executor   | Overseer                         | Trigger policy                       |
+| ------ | ---------- | -------------------------------- | ------------------------------------ |
+| A      | Qwen3.5-9B | —                                | None — executor-only baseline        |
+| B      | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Every step — always-on ceiling       |
+| C1     | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Checkpoints only                     |
+| **C2** | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Adaptive filter — primary system     |
+| C2-nt  | Qwen3.5-9B | DeepSeek-V4-Flash (non-thinking) | Adaptive filter — reasoning ablation |
 
 Strong monolithic baselines (GPT-5.2, Claude-4.5-Opus, DeepSeek-V3.2, Qwen3-Max)
 are cited directly from the DeepPlanning paper and not re-run.
+
+The overseer migration from DeepSeek-V3.2 to DeepSeek-V4-Flash landed in the
+root-wrapper protocol on 2026-04-24. The repo now targets the direct DeepSeek
+API for overseer calls, while the cited DeepPlanning paper baselines still
+reference DeepSeek-V3.2.
 
 The executor and overseer are intentionally from different model families
 (Alibaba / DeepSeek) to ensure performance differences are attributable to the
@@ -108,6 +114,53 @@ The `qwen-plus` alias remains in `configs/models.yaml` only as a compatibility
 shim for vendored travel conversion code that still requests that name. In the
 root wrapper, that alias is routed to the DeepSeek API rather than DashScope.
 
+### DeepSeek overseer configuration
+
+The active wrapper config does **not** use a single `overseer:` block. The
+transport config lives in `configs/models.yaml`, the default model selection
+lives in `configs/experiment.yaml`, and thinking vs. non-thinking mode is chosen
+per system in `configs/system/*.yaml`.
+
+Actual wrapper config shape:
+
+```yaml
+# configs/experiment.yaml
+models:
+  executor: qwen3.5-9b
+  overseer: deepseek-v4-flash
+
+# configs/system/C2.yaml
+overseer_thinking: true
+
+# configs/system/C2-nt.yaml
+overseer_thinking: false
+
+# configs/models.yaml
+deepseek-v4-flash:
+  model_name: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  request_params:
+    reasoning_effort: high
+  extra_body:
+    thinking:
+      type: enabled
+```
+
+In other words, `C2-nt` does not switch to a separate overseer model block. It
+uses the same `models.overseer=deepseek-v4-flash` alias and disables thinking at
+call time via `overseer_thinking: false`.
+
+DeepSeek pricing in `configs/models.yaml` uses cached-input accounting
+(`cached_input_output_v1`) with:
+
+- `$0.028 / M` input tokens on cache hit
+- `$0.14 / M` input tokens on cache miss
+- `$0.28 / M` output tokens
+
+When the provider returns cache-hit and cache-miss token counts, the wrapper
+preserves and logs both values.
+
 ### Sampling configuration
 
 All configured models are pinned to `temperature=0.0` and `top_p=1.0`. The base
@@ -135,6 +188,8 @@ This repo keeps the vendored benchmark submodule read-only during normal use.
 - Benchmark data is materialized by DVC under `data/deepplanning/`
 - Runtime artifacts are written under `outputs/deepplanning/`
 - `.env` lives at the repo root
+- Executor credentials are read from `TOGETHER_API_KEY`; overseer credentials
+  are read from `DEEPSEEK_API_KEY`
 - The wrapper config source of truth lives under `configs/`
 - Model transport aliases are owned by the wrapper layer in
   `configs/models.yaml`

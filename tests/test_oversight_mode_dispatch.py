@@ -6,9 +6,9 @@ import pytest
 
 from oversight import (
     _HOOKS_BY_MODE,
+    ConversationState,
     _oversight_active_for_hook,
     _oversight_active_for_task,
-    ConversationState,
 )
 
 
