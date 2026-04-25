@@ -2542,10 +2542,10 @@ def test_shopping_run_agent_inference_flushes_langfuse(monkeypatch, tmp_path):
 def test_always_mode_budget_exhaustion_returns_none_without_error(monkeypatch):
     evaluate_calls: list[int] = []
 
-    async def fake_evaluate_oversight(**kwargs):
-        state = kwargs["state"]
+    async def fake_evaluate(context):
+        state = context.state
         state.overseer_invocation_count += 1
-        evaluate_calls.append(kwargs["step_index"])
+        evaluate_calls.append(context.step_index)
         return oversight_module.OversightAction(
             should_intervene=False,
             trigger_type="always_on_pre_tool",
@@ -2553,8 +2553,6 @@ def test_always_mode_budget_exhaustion_returns_none_without_error(monkeypatch):
             overseer_invoked=True,
             overseer_mode="thinking",
         )
-
-    monkeypatch.setattr(shopping_module, "evaluate_oversight", fake_evaluate_oversight)
 
     state = ConversationState(
         task_id="1",
@@ -2564,6 +2562,8 @@ def test_always_mode_budget_exhaustion_returns_none_without_error(monkeypatch):
     )
     system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
     system_config.overseer_call_budget_per_task = 1
+    controller = shopping_module._resolve_shopping_oversight_controller(system_config)
+    monkeypatch.setattr(controller, "evaluate", fake_evaluate)
 
     first_action = asyncio.run(
         shopping_module._evaluate_oversight_with_budget(
@@ -2573,6 +2573,7 @@ def test_always_mode_budget_exhaustion_returns_none_without_error(monkeypatch):
             budget_phase="initial",
             budget_step_index=1,
             budget_system_config=system_config,
+            controller=controller,
             hook="pre_tool",
             state=state,
             system_config=system_config,
@@ -2596,6 +2597,7 @@ def test_always_mode_budget_exhaustion_returns_none_without_error(monkeypatch):
             budget_phase="initial",
             budget_step_index=2,
             budget_system_config=system_config,
+            controller=controller,
             hook="pre_tool",
             state=state,
             system_config=system_config,

@@ -70,6 +70,11 @@ integration:
 - `deepplanning/orchestration.py`
 - `experiment/config.py`
 
+Current implementation note: the root wrapper now resolves Shopping oversight
+through semantic `oversight_profile` values and concrete controller classes. The
+older `oversight_mode` label is treated only as a derived compatibility alias,
+not as the authoritative runtime dispatch surface.
+
 ### 1.3 Upstream benchmark files that matter most
 
 These should be treated as authoritative for benchmark semantics:

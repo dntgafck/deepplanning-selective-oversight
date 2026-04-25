@@ -1,6 +1,6 @@
 name: C2-nt
 oversight_enabled: true
-oversight_mode: adaptive
+oversight_profile: adaptive_risk
 overseer_thinking: false
 overseer_prompt_version: c2-lite-v1.3
 loop_similarity_threshold: 0.92

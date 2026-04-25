@@ -68,6 +68,12 @@ The executor and overseer are intentionally from different model families
 (Alibaba / DeepSeek) to ensure performance differences are attributable to the
 oversight architecture rather than model-family scaling.
 
+Implementation note: the wrapper now resolves each system through
+`oversight_profile` into a concrete `OversightController` class. The historical
+`oversight_mode` label remains only as a derived compatibility alias on
+`SystemConfig`; it is no longer the documented config surface or the runtime
+dispatch mechanism.
+
 ---
 
 ## What the adaptive filter does

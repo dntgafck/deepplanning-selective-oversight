@@ -33,16 +33,15 @@ from llm import (
 from oversight import (
     ConversationState,
     H1Outcome,
-    _oversight_active_for_hook,
-    _oversight_active_for_task,
     apply_intervention,
     compute_h1_outcome,
-    evaluate_oversight,
 )
+from oversight.base import OversightContext, OversightController
 from oversight.contracts import (
     load_or_build_execution_contract_with_metadata,
     load_or_build_task_checklist_with_metadata,
 )
+from oversight.factory import build_oversight_controller
 
 from .base import TaskResult
 from .vendor import (
@@ -328,10 +327,13 @@ async def _evaluate_oversight_with_budget(
     budget_phase: str,
     budget_step_index: int,
     budget_system_config: Any,
+    controller: OversightController | None = None,
     **kwargs: Any,
 ) -> Any | None:
     if _overseer_budget_remaining(budget_state, budget_system_config):
-        return await evaluate_oversight(**kwargs)
+        if controller is None:
+            controller = _resolve_shopping_oversight_controller(kwargs["system_config"])
+        return await controller.evaluate(OversightContext(**kwargs))
     await _maybe_log_budget_exhausted(
         logger=logger,
         state=budget_state,
@@ -341,6 +343,16 @@ async def _evaluate_oversight_with_budget(
         system_config=budget_system_config,
     )
     return None
+
+
+def _resolve_shopping_oversight_controller(system_config: Any) -> OversightController:
+    controller = build_oversight_controller(system_config)
+    if isinstance(controller, OversightController):
+        return controller
+    raise TypeError(
+        "Shopping oversight requires a concrete controller, "
+        f"got {type(controller).__name__} for profile {controller.profile!r}"
+    )
 
 
 def _resolve_run_database_dir(
@@ -436,6 +448,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         session_id: str | None = None,
     ) -> TaskResult:
         state.begin()
+        oversight_controller = _resolve_shopping_oversight_controller(system_config)
 
         messages_file: Path | None = None
         if save_messages:
@@ -455,7 +468,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         if save_messages and messages_file is not None:
             self._save_messages(messages, messages_file, 0, "Initial messages")
 
-        oversight_runs_any_hook = _oversight_active_for_task(
+        oversight_runs_any_hook = oversight_controller.is_active_for_task(
             state=state,
             system_config=system_config,
         )
@@ -523,10 +536,11 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             save_messages=save_messages,
             messages_file=messages_file,
             task_query=user_query,
+            oversight_controller=oversight_controller,
             trace_id=trace_id,
             session_id=session_id,
         )
-        if _oversight_active_for_hook(
+        if oversight_controller.is_active_for_hook(
             state=state,
             system_config=system_config,
             hook="midpoint",
@@ -538,6 +552,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 budget_phase="initial",
                 budget_step_index=initial_last_step,
                 budget_system_config=system_config,
+                controller=oversight_controller,
                 hook="midpoint",
                 state=state,
                 system_config=system_config,
@@ -583,6 +598,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             save_messages=save_messages,
             messages_file=messages_file,
             task_query=user_query,
+            oversight_controller=oversight_controller,
             trace_id=trace_id,
             session_id=session_id,
         )
@@ -631,9 +647,14 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         save_messages: bool,
         messages_file: Path | None,
         task_query: str,
-        trace_id: str | None,
-        session_id: str | None,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+        oversight_controller: OversightController | None = None,
     ) -> tuple[list[Any], str, int]:
+        oversight_controller = (
+            oversight_controller
+            or _resolve_shopping_oversight_controller(system_config)
+        )
         last_step_count = 0
         for step_count in range(1, system_config.max_steps + 1):
             last_step_count = step_count
@@ -707,7 +728,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             parse_warnings = _collect_tool_call_parse_warnings(assistant_message)
             assistant_payload = _assistant_message_to_dict(assistant_message, calls)
 
-            if calls and _oversight_active_for_hook(
+            if calls and oversight_controller.is_active_for_hook(
                 state=state,
                 system_config=system_config,
                 hook="pre_tool",
@@ -719,6 +740,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     budget_phase=phase_name,
                     budget_step_index=step_count,
                     budget_system_config=system_config,
+                    controller=oversight_controller,
                     hook="pre_tool",
                     state=state,
                     system_config=system_config,
@@ -863,10 +885,13 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
 
             tool_results: list[dict[str, Any]] = []
             if not calls:
-                if phase_name == "cart_check" and _oversight_active_for_hook(
-                    state=state,
-                    system_config=system_config,
-                    hook="final",
+                if (
+                    phase_name == "cart_check"
+                    and oversight_controller.is_active_for_hook(
+                        state=state,
+                        system_config=system_config,
+                        hook="final",
+                    )
                 ):
                     final_action = await _evaluate_oversight_with_budget(
                         logger=logger,
@@ -875,6 +900,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         budget_phase=phase_name,
                         budget_step_index=step_count,
                         budget_system_config=system_config,
+                        controller=oversight_controller,
                         hook="final",
                         state=state,
                         system_config=system_config,
@@ -1019,10 +1045,13 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         "content": tool_result,
                     }
                 )
-                if not turn_has_pending_notice and _oversight_active_for_hook(
-                    state=state,
-                    system_config=system_config,
-                    hook="post_tool",
+                if (
+                    not turn_has_pending_notice
+                    and oversight_controller.is_active_for_hook(
+                        state=state,
+                        system_config=system_config,
+                        hook="post_tool",
+                    )
                 ):
                     post_tool_action = await _evaluate_oversight_with_budget(
                         logger=logger,
@@ -1031,6 +1060,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         budget_phase=phase_name,
                         budget_step_index=step_count,
                         budget_system_config=system_config,
+                        controller=oversight_controller,
                         hook="post_tool",
                         state=state,
                         system_config=system_config,

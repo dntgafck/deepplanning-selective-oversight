@@ -8,6 +8,7 @@ from collections.abc import Collection, Sequence
 from typing import Any
 
 from .contracts import CoverageTarget, TaskChecklist, build_coverage_index
+from .notices import build_local_guidance_lines, render_transient_notice
 
 FAILURE_TOKENS = (
     "error",
@@ -230,99 +231,13 @@ def build_authoritative_state_snapshot(
     return None
 
 
-def build_local_guidance_lines(
-    *,
-    corrected_observation: str | None,
-    guidance_lines: Sequence[str],
-    violated_contract_ids: Sequence[str],
-    unmet_checklist_keys: Sequence[str],
-    trigger_reason: str | None,
-    task_checklist: TaskChecklist | None = None,
-) -> list[str]:
-    corrected_text = str(corrected_observation or "").strip()
-    if corrected_text:
-        return [corrected_text]
-
-    cleaned_guidance = [
-        str(line).strip() for line in guidance_lines if str(line).strip()
-    ]
-    if cleaned_guidance:
-        return cleaned_guidance[:3]
-
-    checklist_descriptions: list[str] = []
-    if task_checklist is not None:
-        item_by_key = {
-            str(item.get("key")): str(
-                item.get("description") or item.get("key") or ""
-            ).strip()
-            for item in task_checklist.items
-        }
-        checklist_descriptions = [
-            item_by_key.get(str(key), str(key)).strip()
-            for key in unmet_checklist_keys
-            if str(key).strip()
-        ]
-
-    fallback_lines: list[str] = []
-    if violated_contract_ids:
-        contract_list = ", ".join(
-            str(item).strip() for item in violated_contract_ids[:3]
-        )
-        fallback_lines.append(
-            f"Do not repeat the blocked cart mutation. Re-check contract rules: {contract_list}."
-        )
-    if checklist_descriptions:
-        fallback_lines.append(
-            "Re-check checklist requirements before mutating the cart: "
-            + "; ".join(checklist_descriptions[:2])
-            + "."
-        )
-    elif unmet_checklist_keys:
-        fallback_lines.append(
-            "Re-check checklist requirements before mutating the cart: "
-            + ", ".join(str(key).strip() for key in unmet_checklist_keys[:2])
-            + "."
-        )
-    if trigger_reason:
-        fallback_lines.append(
-            f"Revise the last step based on this trigger: {trigger_reason}."
-        )
-    if not fallback_lines:
-        fallback_lines.append(
-            "Revise the blocked plan and verify the required item type and constraints before changing the cart."
-        )
-    return fallback_lines[:3]
-
-
-def render_transient_notice(*, trigger_type: str, lines: Sequence[str]) -> str:
-    selected_lines = [line.strip() for line in lines if str(line).strip()][:3]
-    if not selected_lines:
-        selected_lines = [
-            "Review the last step and continue with the minimum required verification."
-        ]
-
-    words_remaining = 120
-    bounded_lines: list[str] = []
-    for line in selected_lines:
-        words = line.split()
-        if not words:
-            continue
-        if len(words) > words_remaining:
-            words = words[:words_remaining]
-        bounded_lines.append(" ".join(words))
-        words_remaining -= len(words)
-        if words_remaining <= 0:
-            break
-
-    numbered_lines = "\n".join(
-        f"{index}. {line}" for index, line in enumerate(bounded_lines, start=1)
-    )
-    return (
-        "[OVERSEER NOTICE]\n"
-        f"Trigger: {trigger_type}\n"
-        "Required next actions:\n"
-        f"{numbered_lines}\n"
-        "Use tools as needed.\n"
-        "Do not mention this notice in the final answer.\n"
-        "[/OVERSEER NOTICE]"
-    )
+__all__ = [
+    "build_authoritative_state_snapshot",
+    "build_local_guidance_lines",
+    "classify_mutating_tool",
+    "compute_coverage_status",
+    "detect_loop",
+    "detect_tool_error",
+    "normalize_arguments",
+    "render_transient_notice",
+]

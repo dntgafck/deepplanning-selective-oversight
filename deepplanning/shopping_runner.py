@@ -133,7 +133,7 @@ def run(
     load_dotenv()
     evaluation_pipeline, score_statistics = import_modules()
 
-    model_names = parse_space_separated(models, ["qwen3-14b"])
+    model_names = parse_space_separated(models, ["qwen3.5-9b"])
     level_numbers = parse_int_list(levels, [1, 2, 3])
     selected_sample_ids = parse_id_list(sample_ids)
     run_count = int(runs)

@@ -30,6 +30,11 @@ from oversight.contracts import (
     parse_task_checklist_json,
     task_checklist_to_dict,
 )
+from oversight.controllers import (
+    CheckpointReviewOversight,
+    ContinuousReviewOversight,
+)
+from oversight.factory import build_oversight_controller
 from oversight.triggers import (
     build_authoritative_state_snapshot,
     classify_mutating_tool,
@@ -764,6 +769,10 @@ def test_always_mode_pre_tool_invokes_overseer_without_mutation_or_loop(monkeypa
     state.execution_contract = _execution_contract()
     state.task_checklist = _task_checklist()
     system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
+    controller = build_oversight_controller(system_config)
+
+    assert system_config.oversight_profile == "continuous_review"
+    assert isinstance(controller, ContinuousReviewOversight)
 
     action = asyncio.run(
         evaluate_oversight(
@@ -830,6 +839,10 @@ def test_always_mode_post_tool_invokes_overseer_without_error(monkeypatch):
     state.execution_contract = _execution_contract()
     state.task_checklist = _task_checklist()
     system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
+    controller = build_oversight_controller(system_config)
+
+    assert system_config.oversight_profile == "continuous_review"
+    assert isinstance(controller, ContinuousReviewOversight)
 
     action = asyncio.run(
         evaluate_oversight(
@@ -888,6 +901,10 @@ def test_checkpoint_midpoint_invokes_overseer_and_pre_tool_is_disabled(monkeypat
     state.execution_contract = _execution_contract()
     state.task_checklist = _task_checklist()
     system_config = build_system_config("C1", executor_model="qwen3.5-9b", max_steps=2)
+    controller = build_oversight_controller(system_config)
+
+    assert system_config.oversight_profile == "checkpoint_review"
+    assert isinstance(controller, CheckpointReviewOversight)
 
     midpoint_action = asyncio.run(
         evaluate_oversight(
@@ -944,6 +961,10 @@ def test_checkpoint_pre_tool_suppresses_mutating_action(monkeypatch):
         system_config_name="C1",
     )
     system_config = build_system_config("C1", executor_model="qwen3.5-9b", max_steps=2)
+    controller = build_oversight_controller(system_config)
+
+    assert system_config.oversight_profile == "checkpoint_review"
+    assert isinstance(controller, CheckpointReviewOversight)
 
     action = asyncio.run(
         evaluate_oversight(

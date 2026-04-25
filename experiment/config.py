@@ -6,6 +6,18 @@ from typing import Any
 from deepplanning.config import available_system_names, load_system_defaults
 from llm import ProviderConfig
 
+_OVERSIGHT_PROFILE_BY_MODE = {
+    "disabled": "executor_only",
+    "always": "continuous_review",
+    "checkpoint": "checkpoint_review",
+    "adaptive": "adaptive_risk",
+}
+_OVERSIGHT_MODE_BY_PROFILE = {
+    profile: mode for mode, profile in _OVERSIGHT_PROFILE_BY_MODE.items()
+}
+_VALID_OVERSIGHT_PROFILES = frozenset(_OVERSIGHT_MODE_BY_PROFILE)
+_VALID_OVERSIGHT_MODES = frozenset(_OVERSIGHT_PROFILE_BY_MODE)
+
 
 @dataclass(slots=True)
 class SystemConfig:
@@ -13,6 +25,7 @@ class SystemConfig:
     executor_provider: ProviderConfig
     oversight_enabled: bool
     oversight_mode: str
+    oversight_profile: str
     overseer_provider: ProviderConfig | None = None
     overseer_thinking: bool | None = None
     max_steps: int = 400
@@ -96,6 +109,49 @@ def system_config_with_seed_override(
     )
 
 
+def _resolve_oversight_profile(defaults: dict[str, Any]) -> str:
+    explicit_profile = defaults.get("oversight_profile")
+    if explicit_profile is not None:
+        normalized = str(explicit_profile).strip()
+        if normalized not in _VALID_OVERSIGHT_PROFILES:
+            available = ", ".join(sorted(_VALID_OVERSIGHT_PROFILES))
+            raise ValueError(
+                f"Unknown oversight_profile '{normalized}'. Available: {available}"
+            )
+        return normalized
+
+    if not bool(defaults.get("oversight_enabled", False)):
+        return "executor_only"
+
+    mode = str(defaults.get("oversight_mode", "disabled")).strip()
+    if mode in _OVERSIGHT_PROFILE_BY_MODE:
+        return _OVERSIGHT_PROFILE_BY_MODE[mode]
+
+    available = ", ".join(sorted(_OVERSIGHT_PROFILE_BY_MODE))
+    raise ValueError(f"Unknown oversight_mode '{mode}'. Available: {available}")
+
+
+def _resolve_oversight_mode(defaults: dict[str, Any], *, profile: str) -> str:
+    explicit_mode = defaults.get("oversight_mode")
+    if explicit_mode is None:
+        return _OVERSIGHT_MODE_BY_PROFILE[profile]
+
+    normalized = str(explicit_mode).strip()
+    if normalized not in _VALID_OVERSIGHT_MODES:
+        available = ", ".join(sorted(_VALID_OVERSIGHT_MODES))
+        raise ValueError(
+            f"Unknown oversight_mode '{normalized}'. Available: {available}"
+        )
+
+    expected_profile = _OVERSIGHT_PROFILE_BY_MODE[normalized]
+    if expected_profile != profile:
+        raise ValueError(
+            "Config oversight_mode "
+            f"'{normalized}' does not match oversight_profile '{profile}'."
+        )
+    return normalized
+
+
 def build_system_config(
     system_name: str,
     executor_model: str,
@@ -115,12 +171,18 @@ def build_system_config(
     overseer_provider = None
     if oversight_enabled:
         overseer_provider = ProviderConfig.from_model_name(overseer_model)
+    oversight_profile = _resolve_oversight_profile(defaults)
+    oversight_mode = _resolve_oversight_mode(
+        defaults,
+        profile=oversight_profile,
+    )
 
     return SystemConfig(
         name=str(defaults["name"]),
         executor_provider=ProviderConfig.from_model_name(executor_model),
         oversight_enabled=oversight_enabled,
-        oversight_mode=str(defaults["oversight_mode"]),
+        oversight_mode=oversight_mode,
+        oversight_profile=oversight_profile,
         overseer_provider=overseer_provider,
         overseer_thinking=defaults.get("overseer_thinking"),
         max_steps=max_steps,

@@ -1,6 +1,6 @@
 name: B
 oversight_enabled: true
-oversight_mode: always
+oversight_profile: continuous_review
 overseer_thinking: true
 overseer_prompt_version: c2-lite-v1.3
 irreversible_tools: []
