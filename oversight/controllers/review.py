@@ -244,6 +244,7 @@ async def _evaluate_midpoint(context: OversightContext) -> OversightAction:
     coverage_status = compute_coverage_status(
         checklist=context.state.task_checklist,
         tool_history=context.state.tool_calls_history,
+        role_map=getattr(context.system_config, "tool_role_map", None),
     )
     if (
         coverage_status["coverage_fraction"]
@@ -366,7 +367,7 @@ class ContinuousReviewOversight(OversightController):
             system_config=context.system_config,
             hook=context.hook,
         ):
-            return self.noop_action(system_config=context.system_config)
+            return self.inactive_action(context)
         if context.hook == "pre_tool":
             return await _evaluate_pre_tool(context, always_on=True)
         if context.hook == "post_tool":
@@ -389,7 +390,7 @@ class CheckpointReviewOversight(OversightController):
             system_config=context.system_config,
             hook=context.hook,
         ):
-            return self.noop_action(system_config=context.system_config)
+            return self.inactive_action(context)
         if context.hook == "midpoint":
             return await _evaluate_midpoint(context)
         if context.hook == "final":

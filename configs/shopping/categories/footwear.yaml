@@ -1,0 +1,26 @@
+# Optional Shopping product-type hints for footwear normalization.
+hints:
+  - needle: trail shoe
+    label: trail shoe
+  - needle: trail shoes
+    label: trail shoes
+  - needle: running shoe
+    label: running shoe
+  - needle: running shoes
+    label: running shoes
+  - needle: sneaker
+    label: sneakers
+  - needle: sneakers
+    label: sneakers
+  - needle: shoe
+    label: shoes
+  - needle: shoes
+    label: shoes
+  - needle: boot
+    label: boots
+  - needle: boots
+    label: boots
+  - needle: sandal
+    label: sandals
+  - needle: sandals
+    label: sandals

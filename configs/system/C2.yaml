@@ -1,8 +1,11 @@
+# FROZEN 2026-04-25. Do not edit prompts/thresholds without bumping this version and updating freeze hashes.
 name: C2
 oversight_enabled: true
 oversight_profile: adaptive_risk
+oversight_domains:
+  - shopping
 overseer_thinking: true
-overseer_prompt_version: c2-lite-v1.3
+overseer_prompt_version: c2-lite-v1.4-frozen
 loop_similarity_threshold: 0.92
 loop_window: 5
 loop_repeat_count: 3
@@ -10,11 +13,6 @@ coverage_threshold: 0.50
 final_repair_retry_cap: 2
 recent_tool_window: 5
 inject_transient_notice: true
-mutating_tools:
-  - add_product_to_cart
-  - delete_product_from_cart
-  - add_coupon_to_cart
-  - delete_coupon_from_cart
 irreversible_tools: []
 block_on_mutation_mode: auto
 max_hard_blocks_per_args: 2

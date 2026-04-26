@@ -1036,6 +1036,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     step_index=step_count,
                     tool_index=tool_index,
                     mutating_tools=tuple(system_config.mutating_tools),
+                    state_authority_tools=tuple(system_config.state_authority_tools),
                 )
                 state.consecutive_pre_tool_blocks = 0
                 tool_results.append(

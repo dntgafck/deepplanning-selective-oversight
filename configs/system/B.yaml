@@ -1,8 +1,11 @@
+# FROZEN 2026-04-25. Do not edit prompts/thresholds without bumping this version and updating freeze hashes.
 name: B
 oversight_enabled: true
 oversight_profile: continuous_review
+oversight_domains:
+  - shopping
 overseer_thinking: true
-overseer_prompt_version: c2-lite-v1.3
+overseer_prompt_version: c2-lite-v1.4-frozen
 irreversible_tools: []
 block_on_mutation_mode: auto
 max_hard_blocks_per_args: 2

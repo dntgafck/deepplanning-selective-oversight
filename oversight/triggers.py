@@ -4,10 +4,11 @@ import difflib
 import hashlib
 import json
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from .contracts import CoverageTarget, TaskChecklist, build_coverage_index
+from .domain_config import load_oversight_domain_config
 from .notices import build_local_guidance_lines, render_transient_notice
 
 FAILURE_TOKENS = (
@@ -139,14 +140,16 @@ def _contains_any_alias(text: str, aliases: Sequence[str]) -> bool:
     return any(alias.strip().lower() in normalized_text for alias in aliases if alias)
 
 
-def _tool_role_matches(tool_name: str, target: CoverageTarget) -> bool:
-    role_map = {
-        "search": {"search_products"},
-        "details": {"get_product_details"},
-        "shipping": {"calculate_transport_time"},
-        "coupon": {"add_coupon_to_cart", "delete_coupon_from_cart", "get_cart_info"},
-        "user_info": {"get_user_info"},
-    }
+def _default_tool_role_map() -> dict[str, tuple[str, ...]]:
+    return load_oversight_domain_config("shopping").role_map
+
+
+def _tool_role_matches(
+    tool_name: str,
+    target: CoverageTarget,
+    *,
+    role_map: Mapping[str, Collection[str]],
+) -> bool:
     allowed_tools = set()
     for role in target.tool_roles:
         allowed_tools.update(role_map.get(role, set()))
@@ -154,8 +157,12 @@ def _tool_role_matches(tool_name: str, target: CoverageTarget) -> bool:
 
 
 def compute_coverage_status(
-    *, checklist: TaskChecklist, tool_history: list[dict[str, Any]]
+    *,
+    checklist: TaskChecklist,
+    tool_history: list[dict[str, Any]],
+    role_map: Mapping[str, Collection[str]] | None = None,
 ) -> dict[str, Any]:
+    resolved_role_map = role_map or _default_tool_role_map()
     coverage_targets = _iter_coverage_targets(checklist)
     initial_history = [
         record for record in tool_history if str(record.get("phase") or "") == "initial"
@@ -173,20 +180,17 @@ def compute_coverage_status(
             alias_hit = _contains_any_alias(args_text, aliases) or _contains_any_alias(
                 result_text, aliases
             )
-            shipping_hit = (
-                target.category == "shipping"
-                and tool_name == "calculate_transport_time"
-            )
-            coupon_hit = target.category == "coupon" and (
-                tool_name in {"add_coupon_to_cart", "delete_coupon_from_cart"}
-                or alias_hit
-            )
+            coupon_hit = target.category == "coupon" and alias_hit
             budget_hit = target.category == "budget" and (
                 bool(PRICE_PATTERN.search(args_text))
                 or bool(PRICE_PATTERN.search(result_text))
             )
-            role_hit = _tool_role_matches(tool_name, target)
-            if alias_hit or shipping_hit or coupon_hit or budget_hit or role_hit:
+            role_hit = _tool_role_matches(
+                tool_name,
+                target,
+                role_map=resolved_role_map,
+            )
+            if alias_hit or coupon_hit or budget_hit or role_hit:
                 evidence_by_key[target.key].append(
                     {
                         "tool_name": tool_name,
@@ -214,9 +218,15 @@ def compute_coverage_status(
 
 def build_authoritative_state_snapshot(
     tool_history: list[dict[str, Any]],
+    *,
+    authority_tools: Collection[str] | None = None,
 ) -> dict[str, Any] | None:
+    resolved_authority_tools = set(
+        authority_tools
+        or load_oversight_domain_config("shopping").state_authority_tools
+    )
     for record in reversed(tool_history):
-        if record.get("tool_name") != "get_cart_info":
+        if record.get("tool_name") not in resolved_authority_tools:
             continue
         payload = record.get("result_payload")
         if isinstance(payload, dict):

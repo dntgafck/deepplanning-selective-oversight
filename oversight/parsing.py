@@ -62,13 +62,9 @@ def _coerce_blockers(value: Any) -> list[dict[str, str | None]]:
             )
             if not message:
                 if contract_id:
-                    message = (
-                        f"Re-check contract constraint: {humanize_identifier(contract_id)}."
-                    )
+                    message = f"Re-check contract constraint: {humanize_identifier(contract_id)}."
                 elif checklist_key:
-                    message = (
-                        f"Re-check task requirement: {humanize_identifier(checklist_key)}."
-                    )
+                    message = f"Re-check task requirement: {humanize_identifier(checklist_key)}."
                 else:
                     message = humanize_identifier(kind) or "Unspecified blocker."
             return {

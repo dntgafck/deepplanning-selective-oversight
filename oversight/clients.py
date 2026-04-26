@@ -39,10 +39,16 @@ def make_noop_action(
     )
 
 
-def authoritative_snapshot(state: ConversationState) -> dict[str, Any] | None:
+def authoritative_snapshot(
+    state: ConversationState,
+    system_config: Any | None = None,
+) -> dict[str, Any] | None:
     if state.last_authoritative_cart_snapshot is not None:
         return state.last_authoritative_cart_snapshot
-    return build_authoritative_state_snapshot(state.tool_calls_history)
+    return build_authoritative_state_snapshot(
+        state.tool_calls_history,
+        authority_tools=getattr(system_config, "state_authority_tools", None),
+    )
 
 
 def freshness_payload(state: ConversationState) -> dict[str, Any]:
@@ -78,7 +84,8 @@ def final_payload(
         "execution_contract": execution_contract_to_dict(state.execution_contract),
         "task_checklist": task_checklist_to_dict(state.task_checklist),
         "recent_tool_trajectory": recent_tool_trajectory(state, system_config),
-        "authoritative_state_snapshot": authoritative_snapshot(state) or {},
+        "authoritative_state_snapshot": authoritative_snapshot(state, system_config)
+        or {},
         "draft_final_answer": draft_final_answer,
         "freshness": freshness_payload(state),
         "finalization_retry_count": state.final_verification_retry_count,
@@ -103,7 +110,9 @@ async def invoke_runtime_overseer(
     allowed_actions: list[str],
     trigger_reason: str,
     trigger_evidence: dict[str, Any],
-    render_notice_from_action_fn: Callable[[Any], str | None] = render_notice_from_action,
+    render_notice_from_action_fn: Callable[
+        [Any], str | None
+    ] = render_notice_from_action,
     synthesize_guidance_lines_fn: Callable[..., list[str]] = synthesize_guidance_lines,
 ) -> Any:
     provider = getattr(system_config, "overseer_provider", None)
@@ -142,7 +151,8 @@ async def invoke_runtime_overseer(
                             "current_proposed_tool_calls": proposed_tool_calls or [],
                             "latest_observation": latest_tool_result,
                             "authoritative_state_snapshot": authoritative_snapshot(
-                                state
+                                state,
+                                system_config,
                             )
                             or {},
                             "freshness": freshness_payload(state),
@@ -250,7 +260,9 @@ async def invoke_final_verifier(
     phase: Literal["initial", "cart_check"],
     step_index: int,
     draft_final_answer: str,
-    render_notice_from_action_fn: Callable[[Any], str | None] = render_notice_from_action,
+    render_notice_from_action_fn: Callable[
+        [Any], str | None
+    ] = render_notice_from_action,
 ) -> Any:
     provider = getattr(system_config, "overseer_provider", None)
     if provider is None:

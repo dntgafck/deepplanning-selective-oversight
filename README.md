@@ -43,18 +43,19 @@ correctness metric (Case Accuracy) and partial-credit continuous metrics
 
 ## System configurations
 
-Five configurations are compared in the active root-wrapper protocol. Current
+Six configurations are available in the active root-wrapper protocol. Current
 repo defaults use `Qwen3.5-9B` as the executor, `deepseek-v4-flash` as the
 overseer, and treat Shopping-first runs as the primary selective-oversight
 evaluation surface:
 
-| System | Executor   | Overseer                         | Trigger policy                       |
-| ------ | ---------- | -------------------------------- | ------------------------------------ |
-| A      | Qwen3.5-9B | —                                | None — executor-only baseline        |
-| B      | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Every step — always-on ceiling       |
-| C1     | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Checkpoints only                     |
-| **C2** | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Adaptive filter — primary system     |
-| C2-nt  | Qwen3.5-9B | DeepSeek-V4-Flash (non-thinking) | Adaptive filter — reasoning ablation |
+| System     | Executor   | Overseer                         | Trigger policy                                                 |
+| ---------- | ---------- | -------------------------------- | -------------------------------------------------------------- |
+| A          | Qwen3.5-9B | —                                | None — executor-only baseline                                  |
+| B          | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Every step — always-on ceiling                                 |
+| C1         | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Checkpoints only                                               |
+| **C2**     | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Adaptive filter — primary system                               |
+| C2-noretry | Qwen3.5-9B | DeepSeek-V4-Flash (thinking)     | Adaptive filter, verifier runs once with no final repair retry |
+| C2-nt      | Qwen3.5-9B | DeepSeek-V4-Flash (non-thinking) | Adaptive filter — reasoning ablation                           |
 
 Strong monolithic baselines (GPT-5.2, Claude-4.5-Opus, DeepSeek-V3.2, Qwen3-Max)
 are cited directly from the DeepPlanning paper and not re-run.
@@ -95,6 +96,12 @@ result — then execution resumes.
 
 Loop and retry failure-mode semantics are documented in
 [`docs/loop_scenarios.md`](docs/loop_scenarios.md).
+
+`C2-noretry` is a methodological control for the Shopping headline comparison:
+the final verifier still runs once, but it cannot grant the executor a final
+do-over. This separates gains from runtime triggers from gains caused by final
+verifier repair retries. It is distinct from the later `C2-final` ablation,
+which removes the final checkpoint verification component entirely.
 
 ---
 
@@ -207,6 +214,13 @@ pixi run dvc repro deepplanning_data
 pixi run deepplanning-experiment -- experiment=system_a_smoke
 ```
 
+Shopping is the primary and default v1 oversight domain. The frozen Shopping
+split is selected with `shopping.split=tune|test|all`: calibration and tuning
+use `shopping.split=tune`, held-out reporting uses `shopping.split=test`, and
+`shopping.split=all` remains available for compatibility and smoke/debug runs.
+Do not treat the same 120 Shopping tasks as both the tuning and headline
+reporting surface.
+
 One-shot model smoke test:
 
 ```bash
@@ -223,9 +237,14 @@ Override examples:
 
 ```bash
 pixi run deepplanning-experiment -- experiment=system_a_smoke name=my-smoke
-pixi run deepplanning-experiment -- name=travel-c2 domains=[travel] system=C2 travel.language=en
+pixi run deepplanning-experiment -- name=shop-tune domains=[shopping] shopping.split=tune system=C2
+pixi run deepplanning-experiment -- name=shop-heldout domains=[shopping] shopping.split=test system=C2
 pixi run deepplanning-experiment -- name=shop-ablation domains=[shopping] shopping.levels=[1,2] models.executor=qwen3.5-9b
 ```
+
+Travel support remains in the wrapper for optional extension work, but Travel is
+not part of the default v1 headline path and does not currently have active
+Travel-specific oversight calibration.
 
 Each experiment session writes a timestamped directory under
 `outputs/deepplanning/experiments/<name>/<timestamp>/` containing:

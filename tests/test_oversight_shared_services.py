@@ -172,8 +172,14 @@ def test_notice_helpers_render_default_final_notice_and_compat_reexports():
 
     assert DEFAULT_FINAL_NOTICE in notice
     assert action.notice_source == "default_final_notice"
-    assert triggers_module.render_transient_notice is notices_module.render_transient_notice
-    assert triggers_module.build_local_guidance_lines is notices_module.build_local_guidance_lines
+    assert (
+        triggers_module.render_transient_notice
+        is notices_module.render_transient_notice
+    )
+    assert (
+        triggers_module.build_local_guidance_lines
+        is notices_module.build_local_guidance_lines
+    )
 
 
 def test_policy_helpers_preserve_streak_cap_and_retry_cap_behavior():

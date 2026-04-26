@@ -23,14 +23,15 @@ The experiment evaluates five system configurations plus cited baselines,
 forming a controlled comparison structure where each system isolates a single
 architectural variable.
 
-| System | Executor                  | Overseer                         | Trigger Policy  | Purpose                     |
-| ------ | ------------------------- | -------------------------------- | --------------- | --------------------------- |
-| A      | Qwen3.5-9B (non-thinking) | None                             | —               | Executor-only baseline      |
-| B      | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (thinking)     | Every step      | Always-on oversight ceiling |
-| C1     | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (thinking)     | Checkpoint-only | Minimal selective oversight |
-| C2     | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (thinking)     | Adaptive filter | Primary selective oversight |
-| C2-nt  | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (non-thinking) | Adaptive filter | Overseer reasoning ablation |
-| D      | (Cited from paper)        | —                                | —               | Strong monolithic baselines |
+| System     | Executor                  | Overseer                         | Trigger Policy                         | Purpose                     |
+| ---------- | ------------------------- | -------------------------------- | -------------------------------------- | --------------------------- |
+| A          | Qwen3.5-9B (non-thinking) | None                             | —                                      | Executor-only baseline      |
+| B          | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (thinking)     | Every step                             | Always-on oversight ceiling |
+| C1         | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (thinking)     | Checkpoint-only                        | Minimal selective oversight |
+| C2         | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (thinking)     | Adaptive filter                        | Primary selective oversight |
+| C2-noretry | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (thinking)     | Adaptive filter, no final repair retry | Retry-decoupling control    |
+| C2-nt      | Qwen3.5-9B (non-thinking) | DeepSeek-V4-Flash (non-thinking) | Adaptive filter                        | Overseer reasoning ablation |
+| D          | (Cited from paper)        | —                                | —                                      | Strong monolithic baselines |
 
 **System D baselines** are drawn directly from the DeepPlanning paper (Zhang et
 al., 2026) and are not re-run. For Shopping Planning specifically: DeepSeek-V3.2
@@ -71,14 +72,16 @@ comparison for V4-Flash itself.
 
 ### 1.2 Domain Scope
 
-**Primary domain: Shopping Planning (120 tasks).** All system configurations are
-evaluated on the full Shopping Planning benchmark. Shopping is the primary
-domain for several reasons: baseline Case Accuracy rates are meaningfully above
-zero across published models (e.g., DeepSeek-V3.2 non-thinking: 10.6%), making
-it the domain where oversight-induced improvements in binary task success can be
-measured; the evaluation is fully automated with no LLM-based parsing step,
-eliminating a potential confound; and task complexity is structured into three
-levels (Level 1–3), enabling stratified analysis.
+**Primary domain: Shopping Planning (120 tasks).** Shopping is the primary v1
+oversight domain and the default headline path. The 120 Shopping tasks are now
+frozen into a 30-task `tune` split and a 90-task held-out `test` split,
+stratified across Levels 1–3. Further calibration and tuning uses only
+`shopping.split=tune`; held-out reporting uses `shopping.split=test`.
+`shopping.split=all` remains available only for compatibility and debugging.
+Shopping is the primary domain because baseline Case Accuracy rates are
+meaningfully above zero across published models (e.g., DeepSeek-V3.2
+non-thinking: 10.6%), the evaluation is fully automated with no LLM-based plan
+parsing step, and task complexity is structured into three levels.
 
 **Optional extension: Travel Planning (120 tasks).** Travel tasks are included
 only if timeline and budget permit after all Shopping experiments are complete.
@@ -93,11 +96,14 @@ Following the benchmark protocol, each task is run four times for robustness,
 and results are averaged across runs. However, the budget constraints (Section
 1.4) necessitate a tiered approach to run allocation.
 
-| Tier      | Systems      | Runs per task | Shopping runs | Priority  |
-| --------- | ------------ | ------------- | ------------- | --------- |
-| Core      | A, C2, C2-nt | 4             | 480 each      | Must-have |
-| Important | C1           | 4             | 480           | High      |
-| Ceiling   | B            | 2             | 240           | Medium    |
+| Tier      | Systems                  | Runs per held-out test task | Shopping test runs | Priority  |
+| --------- | ------------------------ | --------------------------- | ------------------ | --------- |
+| Core      | A, C2, C2-noretry, C2-nt | 4                           | 360 each           | Must-have |
+| Important | C1                       | 4                           | 360                | High      |
+| Ceiling   | B                        | 2                           | 180                | Medium    |
+
+The 30-task `tune` split is used for calibration and sanity checks only. It is
+not included in held-out headline reporting counts.
 
 System B is allocated 2 runs instead of 4 because it serves primarily as an
 upper-bound reference for oversight cost, not as a system the thesis claims to
@@ -290,15 +296,17 @@ analysis, ablation studies, and error classification.
 
 ### 3.1 Research Question Mapping
 
-| Comparison       | Systems      | Research Question                                              | Primary Metric                            |
-| ---------------- | ------------ | -------------------------------------------------------------- | ----------------------------------------- |
-| A vs. C2         | A, C2        | **RQ1:** Does selective oversight help?                        | Case Accuracy, Match Score                |
-| B vs. C2         | B, C2        | **RQ2:** Is selective better than always-on?                   | Case Accuracy at matched or lower cost    |
-| C2 vs. D         | C2, D-cited  | **RQ3:** Can the architecture compete with monolithic?         | Case Accuracy vs. cost                    |
-| C2 by complexity | C2 subgroups | **RQ4:** Does oversight help more on harder tasks?             | Case Accuracy by Shopping Level (1–3)     |
-| C2 ablations     | C2 variants  | **RQ5:** What drives the gains?                                | Case Accuracy delta per ablated component |
-| C2 vs. C2-nt     | C2, C2-nt    | **Novel:** Does the overseer need reasoning?                   | Case Accuracy, cost                       |
-| C1 vs. C2        | C1, C2       | **Supplementary:** Does mid-trajectory intervention add value? | Case Accuracy, overseer invocation count  |
+| Comparison        | Systems        | Research Question                                              | Primary Metric                            |
+| ----------------- | -------------- | -------------------------------------------------------------- | ----------------------------------------- |
+| A vs. C2          | A, C2          | **RQ1:** Does selective oversight help?                        | Case Accuracy, Match Score                |
+| A vs. C2-noretry  | A, C2-noretry  | **Control:** Do runtime triggers help without final do-overs?  | Case Accuracy, first-attempt breakdown    |
+| C2 vs. C2-noretry | C2, C2-noretry | **Control:** How much comes from final-verifier retry repair?  | Recovered-after-retry count/rate          |
+| B vs. C2          | B, C2          | **RQ2:** Is selective better than always-on?                   | Case Accuracy at matched or lower cost    |
+| C2 vs. D          | C2, D-cited    | **RQ3:** Can the architecture compete with monolithic?         | Case Accuracy vs. cost                    |
+| C2 by complexity  | C2 subgroups   | **RQ4:** Does oversight help more on harder tasks?             | Case Accuracy by Shopping Level (1–3)     |
+| C2 ablations      | C2 variants    | **RQ5:** What drives the gains?                                | Case Accuracy delta per ablated component |
+| C2 vs. C2-nt      | C2, C2-nt      | **Novel:** Does the overseer need reasoning?                   | Case Accuracy, cost                       |
+| C1 vs. C2         | C1, C2         | **Supplementary:** Does mid-trajectory intervention add value? | Case Accuracy, overseer invocation count  |
 
 Under the minimum viable experiment, RQ2 and the C1 comparison are deferred.
 
@@ -370,6 +378,11 @@ Third, Shopping's three-level complexity structure enables clean stratified
 analysis without the continuous complexity gradient of Travel (2–7 day
 itineraries).
 
+Pre-headline methodology work is limited to freezing the Shopping split,
+freezing prompt/threshold/domain artifacts, and decoupling final-verifier retry
+effects with `C2-noretry`. No new headline C2 runs should be started until those
+items are verified. Travel is not part of the default v1 headline path.
+
 ### 4.2 Travel as Optional Extension
 
 If timeline and budget permit after all Shopping experiments, Travel Planning
@@ -417,6 +430,10 @@ statistically significant drop in Case Accuracy relative to full C2, that
 component is validated. If removal has no effect, the trigger is contributing
 cost without benefit and should be pruned.
 
+`C2-noretry` is not `C2−final`: `C2-noretry` still runs the final verifier once
+and blocks only final repair retries, while `C2−final` removes the final
+checkpoint verification component entirely.
+
 ### 5.3 Ablation Budget and Priority
 
 At 2 runs per ablation variant (reduced from 4 to conserve budget):
@@ -463,10 +480,11 @@ Phase 2: Oversight layer + C2 pilot
     │          Is overseer cost per task within estimate?
     │          If NO → iterate on design / adjust budget
     │
-Phase 3: Core systems (A × 4, C2 × 4, C2-nt × 4)
+Phase 3: Core systems (A × 4, C2 × 4, C2-noretry × 4, C2-nt × 4)
     │
-    ├─ Full C2 on Shopping (120 × 4 runs)
-    ├─ Full C2-nt on Shopping (120 × 4 runs)
+    ├─ Full C2 on held-out Shopping test split (90 × 4 runs)
+    ├─ Full C2-noretry on held-out Shopping test split (90 × 4 runs)
+    ├─ Full C2-nt on held-out Shopping test split (90 × 4 runs)
     ├─ System A runs 2–4
     │
     ├─ GATE 3: Does C2 improve over A?
@@ -626,15 +644,15 @@ across v2.1 and later revisions.
 
 ### 8.2 Benchmark Configuration
 
-| Parameter                   | Value                                                        |
-| --------------------------- | ------------------------------------------------------------ |
-| Domain                      | Shopping Planning (primary); Travel Planning (optional)      |
-| Tasks                       | 120 Shopping (all levels)                                    |
-| Maximum tool calls per task | 400                                                          |
-| Stopping rule               | Task complete (agent signals done) OR 400 tool calls reached |
-| Task timeout                | None (rely on tool-call limit)                               |
-| Evaluation method           | DeepPlanning automated code-based evaluation                 |
-| Task language               | English                                                      |
+| Parameter                   | Value                                                                                  |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| Domain                      | Shopping Planning (primary and default); Travel Planning (optional extension only)     |
+| Tasks                       | 30-task Shopping tune split for calibration; 90-task Shopping test split for reporting |
+| Maximum tool calls per task | 400                                                                                    |
+| Stopping rule               | Task complete (agent signals done) OR 400 tool calls reached                           |
+| Task timeout                | None (rely on tool-call limit)                                                         |
+| Evaluation method           | DeepPlanning automated code-based evaluation                                           |
+| Task language               | English                                                                                |
 
 ### 8.3 Oversight Configuration (Systems B, C1, C2, C2-nt)
 

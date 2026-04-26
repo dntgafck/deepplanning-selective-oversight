@@ -1,0 +1,28 @@
+# Shopping-specific oversight semantics used by generic trigger and notice code.
+mutating_tools:
+  - add_product_to_cart
+  - delete_product_from_cart
+  - add_coupon_to_cart
+  - delete_coupon_from_cart
+irreversible_tools: []
+role_map:
+  search:
+    - search_products
+  details:
+    - get_product_details
+  shipping:
+    - calculate_transport_time
+  coupon:
+    - add_coupon_to_cart
+    - delete_coupon_from_cart
+    - get_cart_info
+  user_info:
+    - get_user_info
+state_authority_tool: get_cart_info
+state_authority_state: cart
+default_final_notice_template: "Call {state_authority_tool} before finalizing. The {state_authority_state} state is the source of truth."
+blocked_mutation_template: "Do not repeat the blocked {state_authority_state} mutation until you verify a different candidate or {state_authority_state} state."
+blocked_strategy_template: "The current proposal repeats a blocked pattern. Change strategy before using another {state_authority_state} mutation."
+product_type_hints_enabled: true
+product_type_hint_files:
+  - shopping/categories/footwear.yaml

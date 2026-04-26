@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from experiment import build_system_config
 import oversight as oversight_module
+from experiment import build_system_config
 from oversight import ConversationState
 from oversight.controllers import (
     AdaptiveRiskOversight,
@@ -95,7 +95,11 @@ def test_c2_and_c2_nt_share_adaptive_controller_with_config_only_differences() -
     assert type(c2_controller) is type(c2_nt_controller)
     assert c2_controller.profile == c2_nt_controller.profile == "adaptive_risk"
     assert c2_controller.active_hooks == c2_nt_controller.active_hooks
-    assert c2_controller.runtime_dispatch == c2_nt_controller.runtime_dispatch == "controller"
+    assert (
+        c2_controller.runtime_dispatch
+        == c2_nt_controller.runtime_dispatch
+        == "controller"
+    )
     assert c2_config.overseer_thinking is True
     assert c2_nt_config.overseer_thinking is False
 
@@ -233,7 +237,9 @@ def test_evaluate_oversight_routes_class_backed_profiles_through_controller_inst
     assert action.trigger_type == "controller_routed"
 
 
-def test_evaluate_oversight_positional_adapter_remains_noop_for_adaptive_profiles() -> None:
+def test_evaluate_oversight_positional_adapter_remains_noop_for_adaptive_profiles() -> (
+    None
+):
     state = ConversationState(
         task_id="travel-task",
         domain="travel",

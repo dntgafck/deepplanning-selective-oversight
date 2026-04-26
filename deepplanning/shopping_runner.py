@@ -6,8 +6,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from omegaconf import OmegaConf
+
 from .config import (
     BENCHMARK_ROOT,
+    CONFIG_ROOT,
     DATA_ROOT,
     OUTPUT_ROOT,
     clear_imported_modules,
@@ -27,6 +30,8 @@ from .config import (
 SHOPPING_ROOT = BENCHMARK_ROOT / "shoppingplanning"
 SHOPPING_DATA_ROOT = DATA_ROOT / "shopping"
 SHOPPING_OUTPUT_ROOT = OUTPUT_ROOT / "shopping"
+SHOPPING_SPLITS_PATH = CONFIG_ROOT / "shopping" / "splits.yaml"
+VALID_SHOPPING_SPLITS = frozenset({"all", "tune", "test"})
 
 ensure_repo_imports()
 
@@ -50,6 +55,35 @@ def _build_per_run_seed_by_run(
     if base_seed is None:
         return None
     return {run_id: int(base_seed) + run_id for run_id in range(int(runs))}
+
+
+def _load_split_sample_ids(*, split: str, level: int) -> list[str]:
+    payload = OmegaConf.to_container(OmegaConf.load(SHOPPING_SPLITS_PATH), resolve=True)
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Shopping split config must be a mapping: {SHOPPING_SPLITS_PATH}"
+        )
+
+    split_key = f"{split}_split"
+    level_key = f"level_{level}"
+    split_payload = payload.get(split_key)
+    if not isinstance(split_payload, dict):
+        raise ValueError(f"Shopping split config missing '{split_key}'")
+
+    ids = split_payload.get(level_key)
+    if not isinstance(ids, list):
+        raise ValueError(f"Shopping split config missing '{split_key}.{level_key}'")
+    return [str(sample_id) for sample_id in ids]
+
+
+def _resolve_split_value(split: str) -> str:
+    normalized = str(split).strip()
+    if normalized not in VALID_SHOPPING_SPLITS:
+        available = ", ".join(sorted(VALID_SHOPPING_SPLITS))
+        raise ValueError(
+            f"Unsupported shopping split '{split}'. Expected one of: {available}"
+        )
+    return normalized
 
 
 def evaluate_database(
@@ -121,6 +155,7 @@ def run(
     models: str | list[str] | None = None,
     overseer_model: str = "deepseek-v4-flash",
     levels: int | str | list[int] | list[str] | None = None,
+    split: str = "all",
     sample_ids: int | str | list[int] | list[str] | None = None,
     system: str = "A",
     workers: int = 50,
@@ -135,7 +170,12 @@ def run(
 
     model_names = parse_space_separated(models, ["qwen3.5-9b"])
     level_numbers = parse_int_list(levels, [1, 2, 3])
+    selected_split = _resolve_split_value(split)
     selected_sample_ids = parse_id_list(sample_ids)
+    if selected_sample_ids is not None and selected_split != "all":
+        raise ValueError(
+            "shopping.sample_ids cannot be combined with shopping.split other than 'all'."
+        )
     run_count = int(runs)
     output_root_path = resolve_repo_path(output_root or SHOPPING_OUTPUT_ROOT)
 
@@ -159,6 +199,11 @@ def run(
                 raise FileNotFoundError(
                     f"Shopping data missing at {source_database_dir}. Ensure DVC data bootstrap is present under data/deepplanning/."
                 )
+            level_sample_ids = (
+                selected_sample_ids
+                if selected_split == "all"
+                else _load_split_sample_ids(split=selected_split, level=level)
+            )
             shared_oversight_cache_root = ensure_directory(
                 model_output_root / "_oversight_cache" / f"level_{level}"
             )
@@ -186,7 +231,7 @@ def run(
                     level=level,
                     source_database_dir=source_database_dir,
                     run_database_dir=run_database_dir,
-                    sample_ids=selected_sample_ids,
+                    sample_ids=level_sample_ids,
                 )
                 if test_data_path is None:
                     test_data_path = current_test_data_path
@@ -200,8 +245,9 @@ def run(
             print(f"   Level: {level}")
             print(f"   Runs: {run_count}")
             print(f"   Output root: {model_output_root}")
-            if selected_sample_ids is not None:
-                print(f"   Sample IDs: {', '.join(selected_sample_ids)}")
+            print(f"   Split: {selected_split}")
+            if level_sample_ids is not None:
+                print(f"   Sample IDs: {', '.join(level_sample_ids)}")
 
             system_prompt = shopping_agent_runner.get_system_prompt(level)
             results = shopping_agent_runner.run_agent_inference(

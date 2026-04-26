@@ -2,4 +2,5 @@ levels:
   - 1
   - 2
   - 3
+split: all
 sample_ids: []

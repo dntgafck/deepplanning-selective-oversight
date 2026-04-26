@@ -119,6 +119,10 @@ def _legacy_kwargs_to_public_overrides(kwargs: dict[str, Any]) -> list[str]:
             f"shopping.levels={hydra_value(normalize_int_list(shopping_levels))}"
         )
 
+    shopping_split = resolved.pop("shopping_split", None)
+    if _has_value(shopping_split):
+        overrides.append(f"shopping.split={hydra_value(shopping_split)}")
+
     sample_ids = resolved.pop("sample_ids", None)
     shopping_sample_ids = resolved.pop("shopping_sample_ids", None)
     travel_sample_ids = resolved.pop("travel_sample_ids", None)
@@ -277,7 +281,7 @@ def _domain_names(cfg: Any) -> list[str]:
         if OmegaConf.is_config(cfg.domains)
         else cfg.domains
     )
-    return normalize_string_list(value) or ["travel", "shopping"]
+    return normalize_string_list(value) or ["shopping"]
 
 
 def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
@@ -297,6 +301,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             models=executor_models,
             overseer_model=overseer_model,
             levels=shopping_cfg.get("levels"),
+            split=str(shopping_cfg.get("split", "all") or "all"),
             sample_ids=shopping_cfg.get("sample_ids"),
             system=system_name,
             workers=int(runtime_cfg.get("workers", 20)),

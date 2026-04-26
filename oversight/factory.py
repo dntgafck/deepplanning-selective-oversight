@@ -51,7 +51,9 @@ def resolve_oversight_profile(system_config: Any) -> str:
     )
 
 
-def resolve_oversight_mode_alias(system_config: Any, *, profile: str | None = None) -> str:
+def resolve_oversight_mode_alias(
+    system_config: Any, *, profile: str | None = None
+) -> str:
     resolved_profile = profile or resolve_oversight_profile(system_config)
     explicit_mode = getattr(system_config, "oversight_mode", None)
     if explicit_mode is None:

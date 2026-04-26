@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 import oversight as oversight_module
@@ -3267,6 +3268,109 @@ def test_travel_run_agent_inference_scopes_trace_per_case(monkeypatch, tmp_path)
     assert {call["session_id"] for call in captured_calls} == {"bench-session"}
 
 
+def _install_shopping_wrapper_split_mocks(monkeypatch, tmp_path):
+    captured_sample_ids: list[list[str] | None] = []
+    data_root = tmp_path / "shopping_data"
+    (data_root / "database_level1").mkdir(parents=True)
+
+    def fake_prepare_run_inputs(**kwargs):
+        captured_sample_ids.append(kwargs["sample_ids"])
+        kwargs["run_database_dir"].mkdir(parents=True)
+        test_data_path = tmp_path / f"level_{kwargs['level']}_query_meta.json"
+        test_data_path.write_text("[]", encoding="utf-8")
+        return test_data_path
+
+    monkeypatch.setattr(shopping_runtime_module, "SHOPPING_DATA_ROOT", data_root)
+    monkeypatch.setattr(
+        shopping_runtime_module,
+        "import_modules",
+        lambda: (object(), object()),
+    )
+    monkeypatch.setattr(shopping_runtime_module, "load_model_config", lambda _model: {})
+    monkeypatch.setattr(
+        shopping_runtime_module,
+        "prepare_run_inputs",
+        fake_prepare_run_inputs,
+    )
+    monkeypatch.setattr(
+        shopping_runtime_module.shopping_agent_runner,
+        "get_system_prompt",
+        lambda _level: "prompt",
+    )
+    monkeypatch.setattr(
+        shopping_runtime_module.shopping_agent_runner,
+        "run_agent_inference",
+        lambda **_kwargs: {"success": 1, "total": 1},
+    )
+    monkeypatch.setattr(
+        shopping_runtime_module,
+        "evaluate_database",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        shopping_runtime_module, "write_statistics", lambda *_args: None
+    )
+    return captured_sample_ids
+
+
+def _shopping_split_ids(split_name: str, level: int) -> list[str]:
+    payload = OmegaConf.to_container(
+        OmegaConf.load(shopping_runtime_module.SHOPPING_SPLITS_PATH),
+        resolve=True,
+    )
+    return list(payload[f"{split_name}_split"][f"level_{level}"])
+
+
+def test_shopping_runner_uses_tune_split_ids_when_requested(monkeypatch, tmp_path):
+    captured_sample_ids = _install_shopping_wrapper_split_mocks(monkeypatch, tmp_path)
+
+    shopping_runtime_module.run(
+        models=["qwen3.5-9b"],
+        levels=[1],
+        split="tune",
+        runs=1,
+        output_root=tmp_path / "output",
+    )
+
+    assert captured_sample_ids == [_shopping_split_ids("tune", 1)]
+
+
+def test_shopping_runner_uses_test_split_ids_when_requested(monkeypatch, tmp_path):
+    captured_sample_ids = _install_shopping_wrapper_split_mocks(monkeypatch, tmp_path)
+
+    shopping_runtime_module.run(
+        models=["qwen3.5-9b"],
+        levels=[1],
+        split="test",
+        runs=1,
+        output_root=tmp_path / "output",
+    )
+
+    assert captured_sample_ids == [_shopping_split_ids("test", 1)]
+
+
+def test_shopping_runner_rejects_split_plus_explicit_sample_ids(monkeypatch, tmp_path):
+    _install_shopping_wrapper_split_mocks(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="sample_ids cannot be combined"):
+        shopping_runtime_module.run(
+            models=["qwen3.5-9b"],
+            levels=[1],
+            split="tune",
+            sample_ids=["1"],
+            runs=1,
+            output_root=tmp_path / "output",
+        )
+
+
+def test_orchestration_propagates_shopping_split_override():
+    overrides = orchestration_module._legacy_kwargs_to_public_overrides(
+        {"shopping_split": "test"}
+    )
+
+    assert 'shopping.split="test"' in overrides
+
+
 def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeypatch):
     shopping_calls: list[dict[str, object]] = []
     travel_calls: list[dict[str, object]] = []
@@ -3279,6 +3383,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
                 "output_root": kwargs["output_root"],
                 "langfuse_session_id": kwargs["langfuse_session_id"],
                 "overseer_model": kwargs["overseer_model"],
+                "split": kwargs["split"],
             }
         ),
     )
@@ -3305,7 +3410,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
             "models": {"executor": "qwen3-14b", "overseer": "deepseek-v4-flash"},
             "system": {"name": "A"},
             "runtime": {"workers": 1, "max_llm_calls": 20, "runs": 4},
-            "shopping": {"levels": [1], "sample_ids": ["0"]},
+            "shopping": {"levels": [1], "split": "test", "sample_ids": []},
             "travel": {
                 "language": "en",
                 "start_from": "inference",
@@ -3324,6 +3429,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
             "output_root": Path("/tmp") / "bench-session" / "shopping",
             "langfuse_session_id": "bench-session",
             "overseer_model": "deepseek-v4-flash",
+            "split": "test",
         }
     ]
     assert travel_calls == [
@@ -3361,7 +3467,7 @@ def test_run_experiment_loads_named_config_and_writes_session_metadata(
                 "models": {"executor": "qwen3-14b", "overseer": "deepseek-v4-flash"},
                 "system": {"name": "A"},
                 "runtime": {"workers": 2, "max_llm_calls": 15, "runs": 3},
-                "shopping": {"levels": [1], "sample_ids": ["1"]},
+                "shopping": {"levels": [1], "split": "all", "sample_ids": ["1"]},
                 "travel": {
                     "language": "en",
                     "start_from": "inference",
@@ -3407,6 +3513,7 @@ def test_run_experiment_loads_named_config_and_writes_session_metadata(
     assert metadata["experiment"]["config_path"] == str(experiments_dir / "named.yaml")
     assert metadata["parameters"]["travel"]["sample_ids"] == ["0"]
     assert metadata["parameters"]["shopping"]["sample_ids"] == ["1"]
+    assert metadata["parameters"]["shopping"]["split"] == "all"
     assert metadata["parameters"]["session_root"] == str(session_root)
     assert metadata["launched_command"][:4] == [
         "pixi",
@@ -3431,10 +3538,34 @@ def test_real_hydra_composes_named_experiment_config():
     assert cfg.name == "system-a-smoke"
     assert list(cfg.domains) == ["travel", "shopping"]
     assert list(cfg.shopping.levels) == [1]
+    assert str(cfg.shopping.split) == "all"
     assert list(cfg.shopping.sample_ids) == ["1"]
     assert str(cfg.travel.language) == "en"
     assert list(cfg.travel.sample_ids) == ["0"]
     assert str(cfg.system.name) == "A"
+
+
+def test_real_hydra_composes_shopping_tune_sanity_preset():
+    from deepplanning.config import compose_config
+
+    cfg = compose_config("experiment", ["experiment=shopping_tune_c2_sanity"])
+
+    assert cfg.name == "shopping-tune-c2-sanity"
+    assert list(cfg.domains) == ["shopping"]
+    assert str(cfg.shopping.split) == "tune"
+    assert str(cfg.system.name) == "C2"
+    assert int(cfg.runtime.runs) == 1
+
+
+def test_real_hydra_composes_shopping_test_headline_preset():
+    from deepplanning.config import compose_config
+
+    cfg = compose_config("experiment", ["experiment=shopping_test_headline"])
+
+    assert cfg.name == "shopping-test-headline"
+    assert list(cfg.domains) == ["shopping"]
+    assert str(cfg.shopping.split) == "test"
+    assert str(cfg.system.name) == "C2"
 
 
 def test_run_experiment_script_reaches_argument_validation_without_import_failure():

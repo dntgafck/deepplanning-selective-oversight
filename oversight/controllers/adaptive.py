@@ -20,7 +20,7 @@ class AdaptiveRiskOversight(OversightController):
             system_config=context.system_config,
             hook=context.hook,
         ):
-            return self.noop_action(system_config=context.system_config)
+            return self.inactive_action(context)
         if context.hook == "pre_tool":
             return await _evaluate_pre_tool(context, always_on=False)
         if context.hook == "post_tool":

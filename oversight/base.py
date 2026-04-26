@@ -41,6 +41,15 @@ class OversightController(ABC):
         self.system_name = system_name
         self.oversight_mode = oversight_mode
 
+    def is_domain_in_scope(
+        self, *, state: ConversationState, system_config: Any
+    ) -> bool:
+        domains = getattr(system_config, "oversight_domains", ("shopping",))
+        normalized_domains = {
+            str(domain).strip() for domain in domains if str(domain).strip()
+        }
+        return state.domain in normalized_domains
+
     def is_active_for_hook(
         self,
         *,
@@ -52,7 +61,7 @@ class OversightController(ABC):
             raise ValueError(f"Unknown oversight hook: {hook!r}")
         if not bool(getattr(system_config, "oversight_enabled", False)):
             return False
-        if state.domain != "shopping":
+        if not self.is_domain_in_scope(state=state, system_config=system_config):
             return False
         return hook in self.active_hooks
 
@@ -64,7 +73,7 @@ class OversightController(ABC):
     ) -> bool:
         if not bool(getattr(system_config, "oversight_enabled", False)):
             return False
-        if state.domain != "shopping":
+        if not self.is_domain_in_scope(state=state, system_config=system_config):
             return False
         return bool(self.active_hooks)
 
@@ -83,5 +92,20 @@ class OversightController(ABC):
         return make_noop_action(
             action_factory=OversightAction,
             system_config=system_config,
+            final_result=final_result,
+        )
+
+    def inactive_action(self, context: OversightContext) -> OversightAction:
+        final_result = (
+            "domain_out_of_scope"
+            if bool(getattr(context.system_config, "oversight_enabled", False))
+            and not self.is_domain_in_scope(
+                state=context.state,
+                system_config=context.system_config,
+            )
+            else "not_applicable"
+        )
+        return self.noop_action(
+            system_config=context.system_config,
             final_result=final_result,
         )

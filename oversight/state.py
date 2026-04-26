@@ -12,6 +12,7 @@ from .contracts import (
     ExecutionContract,
     TaskChecklist,
 )
+from .domain_config import load_oversight_domain_config
 from .triggers import classify_mutating_tool, normalize_arguments
 
 
@@ -203,6 +204,7 @@ class ConversationState:
         step_index: int = 0,
         tool_index: int = 0,
         mutating_tools: tuple[str, ...] = (),
+        state_authority_tools: tuple[str, ...] | None = None,
     ) -> None:
         tool_name = str(tool_call.get("name") or "")
         arguments_raw = tool_call.get("arguments")
@@ -230,7 +232,11 @@ class ConversationState:
         }
         self.tool_calls_history.append(record)
 
-        if tool_name == "get_cart_info" and isinstance(result_payload, dict):
+        authority_tools = set(
+            state_authority_tools
+            or load_oversight_domain_config("shopping").state_authority_tools
+        )
+        if tool_name in authority_tools and isinstance(result_payload, dict):
             self.last_authoritative_cart_snapshot = result_payload
             self.last_authoritative_read_step = step_index
             self.last_authoritative_read_event_index = self.tool_event_index

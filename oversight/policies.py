@@ -89,9 +89,7 @@ def compute_h1_outcome(
     return H1Outcome.HARD_BLOCK if block else H1Outcome.APPROVE_WITH_NUDGE
 
 
-def increment_retry_and_check_cap(
-    state: ConversationState, system_config: Any
-) -> bool:
+def increment_retry_and_check_cap(state: ConversationState, system_config: Any) -> bool:
     state.final_verification_retry_count += 1
     if state.final_verification_retry_count > int(
         getattr(system_config, "final_repair_retry_cap", 2)

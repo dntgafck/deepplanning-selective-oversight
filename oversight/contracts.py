@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from llm import call_chat_completion
 
+from .domain_config import load_product_type_hints
+
 if TYPE_CHECKING:
     from experiment import SystemConfig
 
@@ -40,7 +42,7 @@ Separate coverage targets from final verification constraints.
 Required fidelity rules:
 - Preserve explicit product-type or category constraints in machine-usable form.
 - Preserve named item requirements, review or quality constraints, and shipping constraints.
-- Do not promote global task framing (e.g., "footwear collection", "summer outfit", "running gear") into per-item hard constraints. Each item's `value.product_type` must be supported by that item's own description or source span. If an item's product type is unclear or only implied by the overall task theme, leave `value.product_type` null and record the item key in `ambiguities`.
+- Do not promote global task framing (e.g., "collection", "outfit", "set", or "theme") into per-item hard constraints. Each item's `value.product_type` must be supported by that item's own description or source span. If an item's product type is unclear or only implied by the overall task theme, leave `value.product_type` null and record the item key in `ambiguities`.
 - For any hard item-level semantic field you emit, include item-local grounding metadata under `value.support` with field-specific entries such as `support.product_type = {"scope": "item_local", "spans": [...], "strength": "explicit"}`.
 - Coverage targets must be keyed to the corresponding checklist item keys rather than synthetic placeholder keys."""
 
@@ -89,20 +91,7 @@ class ChecklistInvariantError(ValueError):
     """Raised when a normalized checklist violates semantic invariants."""
 
 
-PRODUCT_TYPE_HINTS: tuple[tuple[str, str], ...] = (
-    ("trail shoe", "trail shoe"),
-    ("trail shoes", "trail shoes"),
-    ("running shoe", "running shoe"),
-    ("running shoes", "running shoes"),
-    ("sneaker", "sneakers"),
-    ("sneakers", "sneakers"),
-    ("shoe", "shoes"),
-    ("shoes", "shoes"),
-    ("boot", "boots"),
-    ("boots", "boots"),
-    ("sandal", "sandals"),
-    ("sandals", "sandals"),
-)
+PRODUCT_TYPE_HINTS: tuple[tuple[str, str], ...] = load_product_type_hints("shopping")
 
 ITEM_LOCAL_SUPPORT_SPANS: tuple[str, ...] = (
     "description",
@@ -236,6 +225,7 @@ def _derive_local_product_type_hints(
     *,
     task_query: str,
     item: dict[str, Any],
+    product_type_hints: tuple[tuple[str, str], ...] | None = None,
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Infer item-local product-type hints and their supporting spans."""
     del task_query
@@ -251,7 +241,10 @@ def _derive_local_product_type_hints(
     }
 
     evidence_by_hint: dict[str, list[str]] = {}
-    for needle, label in PRODUCT_TYPE_HINTS:
+    resolved_hints = (
+        PRODUCT_TYPE_HINTS if product_type_hints is None else product_type_hints
+    )
+    for needle, label in resolved_hints:
         for span_name, text in sources.items():
             if not text:
                 continue
@@ -268,6 +261,7 @@ def _normalize_checklist_item(
     *,
     item: dict[str, Any],
     task_query: str,
+    product_type_hints: tuple[tuple[str, str], ...] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     normalized = dict(item)
     original_value = normalized.get("value")
@@ -280,6 +274,7 @@ def _normalize_checklist_item(
     hints, evidence_by_hint = _derive_local_product_type_hints(
         task_query=task_query,
         item=normalized,
+        product_type_hints=product_type_hints,
     )
     normalized_support = _normalize_field_support(value)
     if normalized_support:
@@ -521,9 +516,14 @@ def normalize_task_checklist(
     checklist: TaskChecklist,
     *,
     task_query: str,
+    product_type_hints: tuple[tuple[str, str], ...] | None = None,
 ) -> TaskChecklist:
     normalization_results = [
-        _normalize_checklist_item(item=item, task_query=task_query)
+        _normalize_checklist_item(
+            item=item,
+            task_query=task_query,
+            product_type_hints=product_type_hints,
+        )
         for item in checklist.items
     ]
     normalized_items = [result[0] for result in normalization_results]
@@ -646,6 +646,7 @@ def parse_task_checklist_json(
     payload: str | dict[str, Any],
     *,
     task_query: str | None = None,
+    product_type_hints: tuple[tuple[str, str], ...] | None = None,
 ) -> TaskChecklist:
     data = _extract_json_content(payload) if isinstance(payload, str) else payload
     if not isinstance(data, dict):
@@ -669,7 +670,11 @@ def parse_task_checklist_json(
         compiler_signature=str(data["compiler_signature"]),
     )
     if task_query is not None:
-        return normalize_task_checklist(checklist, task_query=task_query)
+        return normalize_task_checklist(
+            checklist,
+            task_query=task_query,
+            product_type_hints=product_type_hints,
+        )
     return checklist
 
 
@@ -718,12 +723,38 @@ def _compiler_signature(system_config: SystemConfig) -> str:
         resolved_provider = str(system_config.overseer_provider.provider or "unknown")
         resolved_model = system_config.overseer_provider.model
     thinking_mode = "thinking" if system_config.overseer_thinking else "non-thinking"
+    artifact_hash = compiler_artifact_hash(
+        getattr(system_config, "product_type_hints", PRODUCT_TYPE_HINTS)
+    )
     return (
         f"overseer={model_alias}|provider={resolved_provider}|"
         f"model={resolved_model}|mode={thinking_mode}|"
         f"prompt={system_config.overseer_prompt_version}|"
-        f"checklist={CHECKLIST_NORMALIZER_VERSION}"
+        f"checklist={CHECKLIST_NORMALIZER_VERSION}|"
+        f"artifact_hash={artifact_hash}"
     )
+
+
+def compiler_artifact_payload(
+    product_type_hints: tuple[tuple[str, str], ...] | None = None,
+) -> dict[str, Any]:
+    resolved_hints = (
+        PRODUCT_TYPE_HINTS if product_type_hints is None else product_type_hints
+    )
+    return {
+        "P0_SYSTEM_PROMPT": P0_SYSTEM_PROMPT,
+        "P1_SYSTEM_PROMPT": P1_SYSTEM_PROMPT,
+        "PRODUCT_TYPE_HINTS": repr(resolved_hints),
+    }
+
+
+def compiler_artifact_hash(
+    product_type_hints: tuple[tuple[str, str], ...] | None = None,
+) -> str:
+    payload = compiler_artifact_payload(product_type_hints)
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _strict_json_content(response: Any) -> dict[str, Any]:
@@ -896,7 +927,13 @@ async def _compile_task_checklist(
     )
     payload = _strict_json_content(response)
     payload["compiler_signature"] = execution_contract.compiler_signature
-    return parse_task_checklist_json(payload, task_query=task_query)
+    return parse_task_checklist_json(
+        payload,
+        task_query=task_query,
+        product_type_hints=getattr(
+            system_config, "product_type_hints", PRODUCT_TYPE_HINTS
+        ),
+    )
 
 
 async def load_or_build_execution_contract_with_metadata(
@@ -957,6 +994,11 @@ async def load_or_build_task_checklist_with_metadata(
             parse_task_checklist_json(
                 path.read_text(encoding="utf-8"),
                 task_query=task_query,
+                product_type_hints=getattr(
+                    system_config,
+                    "product_type_hints",
+                    PRODUCT_TYPE_HINTS,
+                ),
             ),
             cache_key,
             "hit",
@@ -974,6 +1016,11 @@ async def load_or_build_task_checklist_with_metadata(
         parse_task_checklist_json(
             path.read_text(encoding="utf-8"),
             task_query=task_query,
+            product_type_hints=getattr(
+                system_config,
+                "product_type_hints",
+                PRODUCT_TYPE_HINTS,
+            ),
         ),
         cache_key,
         status,

@@ -1,0 +1,15 @@
+# @package _global_
+
+defaults:
+  - override /system: C2
+
+name: shopping-test-headline
+domains:
+  - shopping
+shopping:
+  levels:
+    - 1
+    - 2
+    - 3
+  split: test
+  sample_ids: []

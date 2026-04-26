@@ -4,10 +4,17 @@ from collections.abc import Sequence
 from typing import Any
 
 from .contracts import TaskChecklist
-
-DEFAULT_FINAL_NOTICE = (
-    "Call get_cart_info before finalizing. The cart state is the source of truth."
+from .domain_config import (
+    default_final_notice,
+    load_oversight_domain_config,
+    render_template,
 )
+
+DEFAULT_FINAL_NOTICE = default_final_notice("shopping")
+
+
+def _shopping_authority_label() -> str:
+    return load_oversight_domain_config("shopping").state_authority_state
 
 
 def humanize_identifier(value: str) -> str:
@@ -61,11 +68,12 @@ def synthesize_guidance_lines(
     if trigger_type == "mutating_action":
         if tool_name:
             guidance_lines.append(
-                f"Do not repeat {tool_name} until you verify a different candidate or cart state."
+                f"Do not repeat {tool_name} until you verify a different candidate or {_shopping_authority_label()} state."
             )
         else:
+            domain_config = load_oversight_domain_config("shopping")
             guidance_lines.append(
-                "Do not repeat the blocked cart mutation until you verify a different candidate or cart state."
+                render_template(domain_config.blocked_mutation_template, domain_config)
             )
     elif trigger_type == "always_on_pre_tool":
         if tool_name:
@@ -75,14 +83,16 @@ def synthesize_guidance_lines(
     elif trigger_type == "always_on_post_tool":
         guidance_lines.append("Review the latest tool result before continuing.")
     elif trigger_type == "loop_detection":
+        domain_config = load_oversight_domain_config("shopping")
         guidance_lines.append(
-            "The current proposal repeats a blocked pattern. Change strategy before using another cart mutation."
+            render_template(domain_config.blocked_strategy_template, domain_config)
         )
     elif trigger_reason:
         guidance_lines.append(trigger_reason)
 
+    authority_label = _shopping_authority_label()
     return guidance_lines or [
-        "Pause, verify the last blocked step, and change strategy before mutating the cart again."
+        f"Pause, verify the last blocked step, and change strategy before mutating the {authority_label} again."
     ]
 
 
@@ -124,18 +134,20 @@ def build_local_guidance_lines(
         contract_list = ", ".join(
             str(item).strip() for item in violated_contract_ids[:3]
         )
+        authority_label = _shopping_authority_label()
         fallback_lines.append(
-            f"Do not repeat the blocked cart mutation. Re-check contract rules: {contract_list}."
+            f"Do not repeat the blocked {authority_label} mutation. Re-check contract rules: {contract_list}."
         )
+    authority_label = _shopping_authority_label()
     if checklist_descriptions:
         fallback_lines.append(
-            "Re-check checklist requirements before mutating the cart: "
+            f"Re-check checklist requirements before mutating the {authority_label}: "
             + "; ".join(checklist_descriptions[:2])
             + "."
         )
     elif unmet_checklist_keys:
         fallback_lines.append(
-            "Re-check checklist requirements before mutating the cart: "
+            f"Re-check checklist requirements before mutating the {authority_label}: "
             + ", ".join(str(key).strip() for key in unmet_checklist_keys[:2])
             + "."
         )
@@ -145,7 +157,7 @@ def build_local_guidance_lines(
         )
     if not fallback_lines:
         fallback_lines.append(
-            "Revise the blocked plan and verify the required item type and constraints before changing the cart."
+            f"Revise the blocked plan and verify the required item type and constraints before changing the {authority_label}."
         )
     return fallback_lines[:3]
 

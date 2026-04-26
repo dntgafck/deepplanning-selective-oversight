@@ -1,4 +1,6 @@
 name: A
 oversight_enabled: false
 oversight_profile: executor_only
+oversight_domains:
+  - shopping
 overseer_thinking: null
