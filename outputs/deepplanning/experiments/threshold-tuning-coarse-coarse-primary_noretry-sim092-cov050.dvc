@@ -1,0 +1,6 @@
+outs:
+- md5: 748dd390fc9bb939c56f54d5303280a3.dir
+  size: 160057407
+  nfiles: 228
+  hash: md5
+  path: threshold-tuning-coarse-coarse-primary_noretry-sim092-cov050

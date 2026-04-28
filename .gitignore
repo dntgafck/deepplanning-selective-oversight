@@ -140,7 +140,9 @@ celerybeat.pid
 .env
 .envrc
 data/deepplanning/
-outputs/deepplanning/
+!outputs/deepplanning/**/
+outputs/deepplanning/**/*
+!outputs/deepplanning/**/*.dvc
 .venv
 env/
 venv/
