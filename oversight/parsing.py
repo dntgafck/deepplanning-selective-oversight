@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
+from .json_utils import extract_json_content, extract_json_object_content
 from .notices import humanize_identifier, synthesize_final_notice_lines
 
 
 def _strict_json_object(payload: str | dict[str, Any]) -> dict[str, Any]:
-    data = json.loads(payload) if isinstance(payload, str) else payload
-    if not isinstance(data, dict):
-        raise ValueError("Expected JSON object payload")
-    return data
+    return extract_json_object_content(payload, expected_keys=("action",))
 
 
 def _coerce_string_list(value: Any) -> list[str]:
@@ -187,6 +184,8 @@ def parse_final_verifier_json(payload: str | dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "extract_json_content",
+    "extract_json_object_content",
     "parse_final_verifier_json",
     "parse_runtime_overseer_json",
 ]

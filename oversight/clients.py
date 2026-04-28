@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 from .contracts import execution_contract_to_dict, task_checklist_to_dict
+from .json_utils import JSON_OBJECT_RESPONSE_FORMAT
 from .notices import (
     DEFAULT_FINAL_NOTICE,
     render_notice_from_action,
@@ -174,6 +175,7 @@ async def invoke_runtime_overseer(
                 },
             ],
             reasoning_enabled=getattr(system_config, "overseer_thinking", None),
+            response_format=JSON_OBJECT_RESPONSE_FORMAT,
             validate_nonempty=True,
         )
         cost = estimate_call_cost_fn(response=response, provider=provider)
@@ -291,6 +293,7 @@ async def invoke_final_verifier(
                 },
             ],
             reasoning_enabled=getattr(system_config, "overseer_thinking", None),
+            response_format=JSON_OBJECT_RESPONSE_FORMAT,
             validate_nonempty=True,
         )
         cost = estimate_call_cost_fn(response=response, provider=provider)

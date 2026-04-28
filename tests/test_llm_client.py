@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 from types import SimpleNamespace
 
 import httpx
@@ -444,6 +445,34 @@ def test_call_chat_completion_typed_fields_override_request_params(monkeypatch):
     assert captured_params[0]["reasoning_effort"] == "high"
 
 
+def test_call_chat_completion_response_format_overrides_request_params(monkeypatch):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="{}")
+
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=llm_client.ProviderConfig(
+                alias="alias",
+                model="openai/o3",
+                request_params={"response_format": {"type": "text"}},
+            ),
+            messages=[{"role": "user", "content": "return json"}],
+            response_format={"type": "json_object"},
+        )
+    )
+
+    assert captured_params[0]["response_format"] == {"type": "json_object"}
+
+
 def test_call_chat_completion_preserves_model_config_reasoning_when_unset(
     monkeypatch,
 ):
@@ -874,6 +903,45 @@ def test_classify_openrouter_input_length_range_error_as_context_exhaustion():
     )
 
     assert classify_exception_failure_subtype(exc) == "context_exhaustion"
+
+
+def test_build_async_client_does_not_import_langfuse_openai_when_disabled(monkeypatch):
+    captured_kwargs: list[dict[str, object]] = []
+
+    class FakeOpenAIAsyncOpenAI:
+        def __init__(self, **kwargs) -> None:
+            captured_kwargs.append(kwargs)
+
+    original_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "langfuse.openai":
+            pytest.fail(
+                "langfuse.openai should only be imported when Langfuse is enabled"
+            )
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.setattr(llm_client, "OpenAIAsyncOpenAI", FakeOpenAIAsyncOpenAI)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    provider = llm_client.ProviderConfig(
+        alias="alias",
+        model="test-model",
+        api_base="https://example.test/v1",
+    )
+
+    client = llm_client._build_async_client(provider, "api-key")
+
+    assert isinstance(client, FakeOpenAIAsyncOpenAI)
+    assert captured_kwargs == [
+        {
+            "max_retries": 0,
+            "api_key": "api-key",
+            "base_url": "https://example.test/v1",
+        }
+    ]
 
 
 def test_call_chat_completion_forwards_trace_id_when_langfuse_enabled(monkeypatch):

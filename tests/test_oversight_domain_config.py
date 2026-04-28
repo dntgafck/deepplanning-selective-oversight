@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from oversight.contracts import CoverageTarget, TaskChecklist
 from oversight.domain_config import default_final_notice, load_oversight_domain_config
-from oversight.triggers import build_authoritative_state_snapshot, compute_coverage_status
+from oversight.triggers import (
+    build_authoritative_state_snapshot,
+    compute_coverage_status,
+)
 
 
 def _checklist() -> TaskChecklist:

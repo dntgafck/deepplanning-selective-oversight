@@ -65,8 +65,7 @@ def load_oversight_domain_config(domain: str = "shopping") -> OversightDomainCon
         mutating_tools=_string_tuple(payload.get("mutating_tools")),
         irreversible_tools=_string_tuple(payload.get("irreversible_tools")),
         role_map={
-            str(role): _string_tuple(tools)
-            for role, tools in role_map_payload.items()
+            str(role): _string_tuple(tools) for role, tools in role_map_payload.items()
         },
         state_authority_tools=authority_tools,
         state_authority_state=str(payload.get("state_authority_state") or "state"),

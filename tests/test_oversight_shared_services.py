@@ -209,7 +209,10 @@ def test_policy_helpers_preserve_streak_cap_and_retry_cap_behavior():
 
 
 def test_clients_runtime_helper_uses_missing_content_fallback_notice():
+    captured_calls: list[dict[str, object]] = []
+
     async def fake_call_chat_completion(**kwargs):
+        captured_calls.append(kwargs)
         return FakeResponse(
             json.dumps(
                 {
@@ -257,10 +260,14 @@ def test_clients_runtime_helper_uses_missing_content_fallback_notice():
     assert action.notice_source == "local_fallback"
     assert "Re-check task requirement: product laptop." in action.notice_text
     assert state.overseer_calls == 1
+    assert captured_calls[0]["response_format"] == {"type": "json_object"}
 
 
 def test_clients_final_helper_counts_parse_fallback_and_requests_retry():
+    captured_calls: list[dict[str, object]] = []
+
     async def fake_call_chat_completion(**kwargs):
+        captured_calls.append(kwargs)
         return FakeResponse("{not valid json", prompt_tokens=10, completion_tokens=3)
 
     state = _state()
@@ -285,3 +292,4 @@ def test_clients_final_helper_counts_parse_fallback_and_requests_retry():
     assert DEFAULT_FINAL_NOTICE in action.notice_text
     assert state.final_verification_retry_count == 1
     assert state.final_verifier_parse_fallback_count == 1
+    assert captured_calls[0]["response_format"] == {"type": "json_object"}

@@ -103,7 +103,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Summarize Shopping final-verifier retry outcomes from task_results.jsonl."
     )
-    parser.add_argument("paths", nargs="+", help="task_results.jsonl files or run directories")
+    parser.add_argument(
+        "paths", nargs="+", help="task_results.jsonl files or run directories"
+    )
     parser.add_argument("--domain", default="shopping")
     args = parser.parse_args(argv)
 

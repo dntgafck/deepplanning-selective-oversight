@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import uuid
 from dataclasses import asdict, dataclass
 from hashlib import sha256
@@ -12,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from llm import call_chat_completion
 
 from .domain_config import load_product_type_hints
+from .json_utils import JSON_OBJECT_RESPONSE_FORMAT, extract_json_object_content
 
 if TYPE_CHECKING:
     from experiment import SystemConfig
@@ -48,6 +48,9 @@ Required fidelity rules:
 
 CHECKLIST_NORMALIZER_VERSION = "shopping-hardening-v4"
 CHECKLIST_SANITIZATION_WARNING_PREFIX = "sanitized:"
+COMPILER_SCHEMA_MAX_ATTEMPTS = 2
+COMPILER_RETRY_EXCERPT_CHARS = 1200
+FALLBACK_CHECKLIST_ID_PREFIX = "fallback-checklist-"
 
 
 @dataclass(slots=True)
@@ -585,42 +588,11 @@ def build_coverage_index(checklist: TaskChecklist) -> CoverageIndex:
     return CoverageIndex(targets=targets)
 
 
-def _extract_json_content(content: str) -> Any:
-    """Parse slightly malformed LLM JSON wrappers before giving up."""
-    content = content.strip()
-
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
-
-    fence = re.search(
-        r"```(?:json)?\s*(.*?)\s*```",
-        content,
-        re.DOTALL,
-    )
-    if fence:
-        try:
-            return json.loads(fence.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    for open_ch, close_ch in (("{", "}"), ("[", "]")):
-        first = content.find(open_ch)
-        last = content.rfind(close_ch)
-        if first != -1 and last > first:
-            try:
-                return json.loads(content[first : last + 1])
-            except json.JSONDecodeError:
-                continue
-
-    return json.loads(content)
-
-
 def parse_execution_contract_json(payload: str | dict[str, Any]) -> ExecutionContract:
-    data = _extract_json_content(payload) if isinstance(payload, str) else payload
-    if not isinstance(data, dict):
-        raise ValueError("Execution contract payload must be a JSON object")
+    data = extract_json_object_content(
+        payload,
+        expected_keys=("contract_id", "domain", "primary_objective"),
+    )
     return ExecutionContract(
         contract_id=str(data["contract_id"]),
         domain=str(data["domain"]),
@@ -648,9 +620,10 @@ def parse_task_checklist_json(
     task_query: str | None = None,
     product_type_hints: tuple[tuple[str, str], ...] | None = None,
 ) -> TaskChecklist:
-    data = _extract_json_content(payload) if isinstance(payload, str) else payload
-    if not isinstance(data, dict):
-        raise ValueError("Task checklist payload must be a JSON object")
+    data = extract_json_object_content(
+        payload,
+        expected_keys=("checklist_id", "items"),
+    )
     checklist = TaskChecklist(
         checklist_id=str(data["checklist_id"]),
         items=[dict(item) for item in data.get("items", [])],
@@ -757,15 +730,91 @@ def compiler_artifact_hash(
     ).hexdigest()[:16]
 
 
-def _strict_json_content(response: Any) -> dict[str, Any]:
+def _strict_json_content(
+    response: Any,
+    *,
+    expected_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
     message = response.choices[0].message
     content = str(getattr(message, "content", "") or "").strip()
     if not content:
         raise ValueError("Overseer returned empty JSON content")
-    payload = _extract_json_content(content)
-    if not isinstance(payload, dict):
-        raise ValueError("Overseer JSON payload must be an object")
-    return payload
+    return extract_json_object_content(content, expected_keys=expected_keys)
+
+
+def _response_content(response: Any) -> str:
+    return str(getattr(response.choices[0].message, "content", "") or "").strip()
+
+
+def _schema_retry_message(
+    *,
+    artifact_name: str,
+    error: BaseException,
+    raw_text: str,
+) -> dict[str, str]:
+    excerpt = raw_text[:COMPILER_RETRY_EXCERPT_CHARS]
+    if len(raw_text) > COMPILER_RETRY_EXCERPT_CHARS:
+        excerpt += "...[truncated]"
+    return {
+        "role": "user",
+        "content": (
+            f"Your previous {artifact_name} response did not match the required "
+            f"JSON object schema. Error: {error}\n\n"
+            "Return exactly one JSON object matching the response_schema from the "
+            "previous request. Do not return an array, string, markdown fence, "
+            "commentary, or wrapper text.\n\n"
+            f"Previous response excerpt:\n{excerpt}"
+        ),
+    }
+
+
+def _fallback_task_checklist(
+    *,
+    task_id: str,
+    task_query: str,
+    execution_contract: ExecutionContract,
+    failure_reason: str,
+    product_type_hints: tuple[tuple[str, str], ...] | None = None,
+) -> TaskChecklist:
+    checklist_id = (
+        FALLBACK_CHECKLIST_ID_PREFIX
+        + sha256(
+            f"{task_id}|{task_query}|{execution_contract.contract_id}".encode("utf-8")
+        ).hexdigest()[:12]
+    )
+    checklist = TaskChecklist(
+        checklist_id=checklist_id,
+        items=[
+            {
+                "key": "fallback:task_requirements",
+                "category": "final_requirement",
+                "description": (
+                    "Satisfy every explicit requirement in the original task query. "
+                    "The task-specific checklist compiler failed schema validation."
+                ),
+                "value": {"task_query": task_query},
+                "required": True,
+                "explicit": True,
+                "coverage_relevant": False,
+                "final_verify_only": True,
+                "aliases": [],
+                "source_text": task_query,
+            }
+        ],
+        coverage_targets=[],
+        final_verification_only_keys=["fallback:task_requirements"],
+        ambiguities=[
+            "fallback: task checklist compiler failed schema validation after "
+            f"{COMPILER_SCHEMA_MAX_ATTEMPTS} attempts; using conservative "
+            f"final-verification-only checklist. Last error: {failure_reason}",
+        ],
+        compiler_signature=execution_contract.compiler_signature,
+    )
+    return normalize_task_checklist(
+        checklist,
+        task_query=task_query,
+        product_type_hints=product_type_hints,
+    )
 
 
 def _cache_path(cache_root: Path, subdir: str, cache_key: str) -> Path:
@@ -799,54 +848,77 @@ async def _compile_execution_contract(
         raise ValueError("Adaptive oversight requires an overseer provider")
 
     compiler_signature = _compiler_signature(system_config)
-    response = await call_chat_completion(
-        provider=system_config.overseer_provider,
-        messages=[
-            {"role": "system", "content": P0_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "domain": domain,
-                        "executor_system_prompt": executor_system_prompt,
-                        "tool_schema": tool_schema,
-                        "response_schema": {
-                            "contract_id": "string",
-                            "domain": "shopping",
-                            "primary_objective": "string",
-                            "objective_priority": ["string"],
-                            "hard_rules": [{"id": "string", "text": "string"}],
-                            "state_authority_rules": [
-                                {
-                                    "state": "cart",
-                                    "tool": "get_cart_info",
-                                    "authoritative": True,
-                                }
-                            ],
-                            "level_policy": {
-                                "budget_priority": "primary|secondary|none",
-                                "coupon_reasoning_required": True,
-                                "allow_over_budget_explanation": False,
-                            },
-                            "tool_semantics": {
-                                "mutating_tools": ["string"],
-                                "read_only_tools": ["string"],
-                                "search_tools": ["string"],
-                                "verification_tools": ["string"],
-                            },
-                            "final_output_requirements": ["string"],
+    messages = [
+        {"role": "system", "content": P0_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "domain": domain,
+                    "executor_system_prompt": executor_system_prompt,
+                    "tool_schema": tool_schema,
+                    "response_schema": {
+                        "contract_id": "string",
+                        "domain": "shopping",
+                        "primary_objective": "string",
+                        "objective_priority": ["string"],
+                        "hard_rules": [{"id": "string", "text": "string"}],
+                        "state_authority_rules": [
+                            {
+                                "state": "cart",
+                                "tool": "get_cart_info",
+                                "authoritative": True,
+                            }
+                        ],
+                        "level_policy": {
+                            "budget_priority": "primary|secondary|none",
+                            "coupon_reasoning_required": True,
+                            "allow_over_budget_explanation": False,
                         },
+                        "tool_semantics": {
+                            "mutating_tools": ["string"],
+                            "read_only_tools": ["string"],
+                            "search_tools": ["string"],
+                            "verification_tools": ["string"],
+                        },
+                        "final_output_requirements": ["string"],
                     },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        reasoning_enabled=system_config.overseer_thinking,
-        validate_nonempty=True,
-    )
-    payload = _strict_json_content(response)
-    payload["compiler_signature"] = compiler_signature
-    return parse_execution_contract_json(payload)
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    last_error: BaseException | None = None
+    for attempt_index in range(COMPILER_SCHEMA_MAX_ATTEMPTS):
+        response = await call_chat_completion(
+            provider=system_config.overseer_provider,
+            messages=messages,
+            reasoning_enabled=system_config.overseer_thinking,
+            response_format=JSON_OBJECT_RESPONSE_FORMAT,
+            validate_nonempty=True,
+        )
+        try:
+            payload = _strict_json_content(
+                response,
+                expected_keys=("contract_id", "domain", "primary_objective"),
+            )
+            payload["compiler_signature"] = compiler_signature
+            return parse_execution_contract_json(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            last_error = exc
+            if attempt_index + 1 >= COMPILER_SCHEMA_MAX_ATTEMPTS:
+                break
+            messages = messages + [
+                _schema_retry_message(
+                    artifact_name="execution contract",
+                    error=exc,
+                    raw_text=_response_content(response),
+                )
+            ]
+    raise ValueError(
+        "Overseer execution contract compiler failed schema validation after "
+        f"{COMPILER_SCHEMA_MAX_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
 
 
 async def _compile_task_checklist(
@@ -859,77 +931,105 @@ async def _compile_task_checklist(
     if system_config.overseer_provider is None:
         raise ValueError("Adaptive oversight requires an overseer provider")
 
-    response = await call_chat_completion(
-        provider=system_config.overseer_provider,
-        messages=[
-            {"role": "system", "content": P1_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "execution_contract": execution_contract_to_dict(
-                            execution_contract
-                        ),
-                        "task_query": task_query,
-                        "response_schema": {
-                            "checklist_id": "string",
-                            "items": [
-                                {
-                                    "key": "string",
-                                    "category": "required_product|product_attribute|budget|shipping|coupon|ambiguity|final_requirement",
-                                    "description": "string",
-                                    "value": {
-                                        "product_type": "string|null",
-                                        "name": "string|null",
-                                        "brand": "string|null",
-                                        "color": "string|null",
-                                        "support": {
-                                            "product_type": {
-                                                "scope": "item_local",
-                                                "spans": [
-                                                    "description|source_text|value_name"
-                                                ],
-                                                "strength": "explicit|derived",
-                                            }
-                                        },
-                                        "review_criteria": "object|null",
-                                        "shipping_constraints": "object|null",
-                                        "other_constraints": "object|null",
+    messages = [
+        {"role": "system", "content": P1_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "execution_contract": execution_contract_to_dict(
+                        execution_contract
+                    ),
+                    "task_query": task_query,
+                    "response_schema": {
+                        "checklist_id": "string",
+                        "items": [
+                            {
+                                "key": "string",
+                                "category": "required_product|product_attribute|budget|shipping|coupon|ambiguity|final_requirement",
+                                "description": "string",
+                                "value": {
+                                    "product_type": "string|null",
+                                    "name": "string|null",
+                                    "brand": "string|null",
+                                    "color": "string|null",
+                                    "support": {
+                                        "product_type": {
+                                            "scope": "item_local",
+                                            "spans": [
+                                                "description|source_text|value_name"
+                                            ],
+                                            "strength": "explicit|derived",
+                                        }
                                     },
-                                    "required": True,
-                                    "explicit": True,
-                                    "coverage_relevant": True,
-                                    "final_verify_only": False,
-                                    "aliases": ["string"],
-                                    "source_text": "string|null",
-                                }
-                            ],
-                            "coverage_targets": [
-                                {
-                                    "key": "string",
-                                    "category": "product|attribute|budget|shipping|coupon",
-                                    "aliases": ["string"],
-                                    "tool_roles": [
-                                        "search|details|shipping|coupon|user_info"
-                                    ],
-                                }
-                            ],
-                            "final_verification_only_keys": ["string"],
-                            "ambiguities": ["string"],
-                        },
+                                    "review_criteria": "object|null",
+                                    "shipping_constraints": "object|null",
+                                    "other_constraints": "object|null",
+                                },
+                                "required": True,
+                                "explicit": True,
+                                "coverage_relevant": True,
+                                "final_verify_only": False,
+                                "aliases": ["string"],
+                                "source_text": "string|null",
+                            }
+                        ],
+                        "coverage_targets": [
+                            {
+                                "key": "string",
+                                "category": "product|attribute|budget|shipping|coupon",
+                                "aliases": ["string"],
+                                "tool_roles": [
+                                    "search|details|shipping|coupon|user_info"
+                                ],
+                            }
+                        ],
+                        "final_verification_only_keys": ["string"],
+                        "ambiguities": ["string"],
                     },
-                    ensure_ascii=False,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    last_error: BaseException | None = None
+    for attempt_index in range(COMPILER_SCHEMA_MAX_ATTEMPTS):
+        response = await call_chat_completion(
+            provider=system_config.overseer_provider,
+            messages=messages,
+            reasoning_enabled=system_config.overseer_thinking,
+            response_format=JSON_OBJECT_RESPONSE_FORMAT,
+            validate_nonempty=True,
+        )
+        try:
+            payload = _strict_json_content(
+                response,
+                expected_keys=("checklist_id", "items"),
+            )
+            payload["compiler_signature"] = execution_contract.compiler_signature
+            return parse_task_checklist_json(
+                payload,
+                task_query=task_query,
+                product_type_hints=getattr(
+                    system_config, "product_type_hints", PRODUCT_TYPE_HINTS
                 ),
-            },
-        ],
-        reasoning_enabled=system_config.overseer_thinking,
-        validate_nonempty=True,
-    )
-    payload = _strict_json_content(response)
-    payload["compiler_signature"] = execution_contract.compiler_signature
-    return parse_task_checklist_json(
-        payload,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            last_error = exc
+            if attempt_index + 1 >= COMPILER_SCHEMA_MAX_ATTEMPTS:
+                break
+            messages = messages + [
+                _schema_retry_message(
+                    artifact_name="task checklist",
+                    error=exc,
+                    raw_text=_response_content(response),
+                )
+            ]
+    return _fallback_task_checklist(
+        task_id=task_id,
         task_query=task_query,
+        execution_contract=execution_contract,
+        failure_reason=str(last_error),
         product_type_hints=getattr(
             system_config, "product_type_hints", PRODUCT_TYPE_HINTS
         ),
@@ -990,18 +1090,23 @@ async def load_or_build_task_checklist_with_metadata(
     )
     path = _cache_path(cache_root, "checklists", cache_key)
     if path.exists():
-        return (
-            parse_task_checklist_json(
-                path.read_text(encoding="utf-8"),
-                task_query=task_query,
-                product_type_hints=getattr(
-                    system_config,
-                    "product_type_hints",
-                    PRODUCT_TYPE_HINTS,
-                ),
+        checklist = parse_task_checklist_json(
+            path.read_text(encoding="utf-8"),
+            task_query=task_query,
+            product_type_hints=getattr(
+                system_config,
+                "product_type_hints",
+                PRODUCT_TYPE_HINTS,
             ),
+        )
+        return (
+            checklist,
             cache_key,
-            "hit",
+            (
+                "fallback_hit"
+                if checklist.checklist_id.startswith(FALLBACK_CHECKLIST_ID_PREFIX)
+                else "hit"
+            ),
         )
 
     checklist = await _compile_task_checklist(
@@ -1011,7 +1116,10 @@ async def load_or_build_task_checklist_with_metadata(
         system_config=system_config,
     )
     wrote_file = _write_json_atomic(path, task_checklist_to_dict(checklist))
-    status = "built" if wrote_file else "hit"
+    if checklist.checklist_id.startswith(FALLBACK_CHECKLIST_ID_PREFIX):
+        status = "fallback_built" if wrote_file else "fallback_hit"
+    else:
+        status = "built" if wrote_file else "hit"
     return (
         parse_task_checklist_json(
             path.read_text(encoding="utf-8"),

@@ -4,6 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import oversight.contracts as oversight_contracts
 from experiment import build_system_config
 from llm import client as llm_client
 from oversight import (
@@ -350,6 +351,17 @@ def test_contract_parser_tolerates_markdown_fenced_json():
     assert contract.domain == "shopping"
 
 
+def test_contract_parser_tolerates_wrapped_json_after_invalid_braces():
+    payload = json.dumps(execution_contract_to_dict(_execution_contract()))
+
+    contract = parse_execution_contract_json(
+        f"Compiler notes {{not-json}} before payload.\n{payload}\nDone."
+    )
+
+    assert contract.contract_id == "contract-shopping"
+    assert contract.domain == "shopping"
+
+
 def test_checklist_parser_accepts_valid_p1_json():
     payload = task_checklist_to_dict(_task_checklist())
     payload["coverage_targets"] = [
@@ -386,10 +398,226 @@ def test_checklist_parser_tolerates_wrapped_json_text():
 def test_strict_json_content_tolerates_fenced_response():
     payload = execution_contract_to_dict(_execution_contract())
 
-    parsed = _strict_json_content(FakeResponse(f"```json\n{json.dumps(payload)}\n```"))
+    parsed = _strict_json_content(FakeResponse(f"```JSON\n{json.dumps(payload)}\n```"))
 
     assert parsed["contract_id"] == "contract-shopping"
     assert parsed["domain"] == "shopping"
+
+
+def test_strict_json_content_tolerates_singleton_array_response():
+    payload = execution_contract_to_dict(_execution_contract())
+
+    parsed = _strict_json_content(FakeResponse(json.dumps([payload])))
+
+    assert parsed["contract_id"] == "contract-shopping"
+    assert parsed["domain"] == "shopping"
+
+
+def test_strict_json_content_rejects_singleton_plain_text_array():
+    try:
+        _strict_json_content(FakeResponse(json.dumps(["plain text, not an object"])))
+    except ValueError as exc:
+        assert "Expected JSON object payload, got list" in str(exc)
+    else:
+        raise AssertionError("Expected singleton plain-text array to fail")
+
+
+def test_strict_json_content_tolerates_enveloped_contract_response():
+    payload = execution_contract_to_dict(_execution_contract())
+
+    parsed = _strict_json_content(
+        FakeResponse(json.dumps({"execution_contract": payload})),
+        expected_keys=("contract_id", "domain", "primary_objective"),
+    )
+
+    assert parsed["contract_id"] == "contract-shopping"
+    assert parsed["domain"] == "shopping"
+
+
+def test_compiler_calls_request_json_object_response_format(monkeypatch):
+    captured_calls: list[dict[str, object]] = []
+    checklist_payload = task_checklist_to_dict(_task_checklist())
+    checklist_payload["coverage_targets"] = [
+        {
+            "key": "product:laptop",
+            "category": "product",
+            "aliases": ["laptop"],
+            "tool_roles": ["search"],
+        }
+    ]
+    responses = [
+        FakeResponse(json.dumps(execution_contract_to_dict(_execution_contract()))),
+        FakeResponse(json.dumps(checklist_payload)),
+    ]
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_calls.append(kwargs)
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        oversight_contracts,
+        "call_chat_completion",
+        fake_call_chat_completion,
+    )
+    system_config = SimpleNamespace(
+        overseer_provider=SimpleNamespace(
+            alias="fake-overseer",
+            provider="openai",
+            model="fake-model",
+        ),
+        overseer_thinking=True,
+        overseer_prompt_version="test-prompt",
+    )
+
+    contract = asyncio.run(
+        oversight_contracts._compile_execution_contract(
+            domain="shopping",
+            executor_system_prompt="executor prompt",
+            tool_schema=[],
+            system_config=system_config,
+        )
+    )
+    asyncio.run(
+        oversight_contracts._compile_task_checklist(
+            task_id="task-1",
+            task_query="buy a laptop",
+            execution_contract=contract,
+            system_config=system_config,
+        )
+    )
+
+    assert [call["response_format"] for call in captured_calls] == [
+        {"type": "json_object"},
+        {"type": "json_object"},
+    ]
+
+
+def test_contract_compiler_schema_retry_succeeds_after_plain_text_array(monkeypatch):
+    captured_calls: list[dict[str, object]] = []
+    responses = [
+        FakeResponse(json.dumps(["plain text, not an object"])),
+        FakeResponse(json.dumps(execution_contract_to_dict(_execution_contract()))),
+    ]
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_calls.append(kwargs)
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        oversight_contracts,
+        "call_chat_completion",
+        fake_call_chat_completion,
+    )
+    system_config = SimpleNamespace(
+        overseer_provider=SimpleNamespace(
+            alias="fake-overseer",
+            provider="openai",
+            model="fake-model",
+        ),
+        overseer_thinking=True,
+        overseer_prompt_version="test-prompt",
+    )
+
+    contract = asyncio.run(
+        oversight_contracts._compile_execution_contract(
+            domain="shopping",
+            executor_system_prompt="executor prompt",
+            tool_schema=[],
+            system_config=system_config,
+        )
+    )
+
+    assert contract.contract_id == "contract-shopping"
+    assert len(captured_calls) == 2
+    assert "Do not return an array" in captured_calls[1]["messages"][-1]["content"]
+    assert captured_calls[1]["response_format"] == {"type": "json_object"}
+
+
+def test_contract_compiler_fails_clearly_after_schema_retry(monkeypatch):
+    captured_calls: list[dict[str, object]] = []
+    responses = [
+        FakeResponse(json.dumps(["plain text, not an object"])),
+        FakeResponse(json.dumps(["still not an object"])),
+    ]
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_calls.append(kwargs)
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        oversight_contracts,
+        "call_chat_completion",
+        fake_call_chat_completion,
+    )
+    system_config = SimpleNamespace(
+        overseer_provider=SimpleNamespace(
+            alias="fake-overseer",
+            provider="openai",
+            model="fake-model",
+        ),
+        overseer_thinking=True,
+        overseer_prompt_version="test-prompt",
+    )
+
+    try:
+        asyncio.run(
+            oversight_contracts._compile_execution_contract(
+                domain="shopping",
+                executor_system_prompt="executor prompt",
+                tool_schema=[],
+                system_config=system_config,
+            )
+        )
+    except ValueError as exc:
+        assert "execution contract compiler failed schema validation" in str(exc)
+    else:
+        raise AssertionError("Expected execution contract compiler to fail clearly")
+    assert len(captured_calls) == 2
+    assert "Do not return an array" in captured_calls[1]["messages"][-1]["content"]
+
+
+def test_task_checklist_compiler_falls_back_after_schema_retry(monkeypatch):
+    captured_calls: list[dict[str, object]] = []
+    responses = [
+        FakeResponse(json.dumps(["plain text, not an object"])),
+        FakeResponse(json.dumps(["still not an object"])),
+    ]
+
+    async def fake_call_chat_completion(**kwargs):
+        captured_calls.append(kwargs)
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        oversight_contracts,
+        "call_chat_completion",
+        fake_call_chat_completion,
+    )
+    system_config = SimpleNamespace(
+        overseer_provider=SimpleNamespace(
+            alias="fake-overseer",
+            provider="openai",
+            model="fake-model",
+        ),
+        overseer_thinking=True,
+        overseer_prompt_version="test-prompt",
+        product_type_hints=(),
+    )
+
+    checklist = asyncio.run(
+        oversight_contracts._compile_task_checklist(
+            task_id="task-1",
+            task_query="buy a laptop",
+            execution_contract=_execution_contract(),
+            system_config=system_config,
+        )
+    )
+
+    assert checklist.checklist_id.startswith("fallback-checklist-")
+    assert checklist.coverage_targets == []
+    assert checklist.final_verification_only_keys == ["fallback:task_requirements"]
+    assert "fallback:" in checklist.ambiguities[0]
+    assert len(captured_calls) == 2
+    assert "Do not return an array" in captured_calls[1]["messages"][-1]["content"]
 
 
 def test_runtime_overseer_parser_accepts_valid_p2_json():
@@ -428,6 +656,47 @@ def test_runtime_overseer_parser_accepts_valid_p2_json():
     assert parsed_v12["violated_contract_ids"] == parsed["violated_contract_ids"]
     assert parsed_v12["unmet_checklist_keys"] == parsed["unmet_checklist_keys"]
     assert parsed_v12["violation_confidence"] == "low"
+
+
+def test_runtime_overseer_parser_tolerates_wrapped_json_text():
+    payload = {
+        "action": "provide_guidance",
+        "decision_summary": "Premature mutation",
+        "violation_evidence": {
+            "violated_contract_ids": ["mut.precondition.1"],
+            "unmet_checklist_keys": ["item:nike_orange_footwear"],
+            "confidence": "medium",
+        },
+        "guidance_lines": ["Verify product category before adding to cart."],
+        "corrected_observation": None,
+    }
+
+    parsed = parse_runtime_overseer_json(
+        f"Reasoning {{not-json}}.\n```json\n{json.dumps(payload)}\n```\nDone."
+    )
+
+    assert parsed["action"] == "provide_guidance"
+    assert parsed["violated_contract_ids"] == ["mut.precondition.1"]
+    assert parsed["violation_confidence"] == "medium"
+
+
+def test_runtime_overseer_parser_tolerates_singleton_array_json():
+    payload = {
+        "action": "approve",
+        "decision_summary": "No violation.",
+        "violation_evidence": {
+            "violated_contract_ids": [],
+            "unmet_checklist_keys": [],
+            "confidence": "low",
+        },
+        "guidance_lines": [],
+        "corrected_observation": None,
+    }
+
+    parsed = parse_runtime_overseer_json(json.dumps([payload]))
+
+    assert parsed["action"] == "approve"
+    assert parsed["violated_contract_ids"] == []
 
 
 def test_h1_gate_approves_reversible_mutation_by_default():
@@ -623,6 +892,25 @@ def test_parse_final_verifier_accepts_string_blockers():
             "checklist_key": None,
         }
     ]
+    assert parsed["next_step_notice_lines"] == ["Call get_cart_info before finalizing."]
+
+
+def test_parse_final_verifier_tolerates_wrapped_json_text():
+    payload = {
+        "action": "run_verification",
+        "pass": False,
+        "decision_summary": "Cart freshness is unknown.",
+        "blockers": "Call get_cart_info before finalizing.",
+        "next_step_notice_lines": [],
+        "violated_contract_ids": [],
+        "unmet_checklist_keys": [],
+    }
+
+    parsed = parse_final_verifier_json(
+        f"Verifier notes {{not-json}} before payload.\n{json.dumps(payload)}\nDone."
+    )
+
+    assert parsed["action"] == "run_verification"
     assert parsed["next_step_notice_lines"] == ["Call get_cart_info before finalizing."]
 
 

@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langfuse import Langfuse, get_client, propagate_attributes
-from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
 from openai import AsyncOpenAI as OpenAIAsyncOpenAI
 from tenacity import (
     AsyncRetrying,
@@ -258,7 +257,12 @@ def _build_async_client(
     if provider.api_base:
         client_kwargs["base_url"] = provider.api_base
 
-    client_cls = LangfuseAsyncOpenAI if _langfuse_enabled() else OpenAIAsyncOpenAI
+    if _langfuse_enabled():
+        from langfuse.openai import AsyncOpenAI as LangfuseAsyncOpenAI
+
+        client_cls = LangfuseAsyncOpenAI
+    else:
+        client_cls = OpenAIAsyncOpenAI
     return client_cls(**client_kwargs)
 
 
@@ -267,6 +271,7 @@ async def call_chat_completion(
     messages: list[Any],
     tools: list[dict[str, Any]] | None = None,
     reasoning_enabled: bool | None = None,
+    response_format: dict[str, Any] | None = None,
     validate_nonempty: bool = False,
     on_attempt_error: RetryErrorHandler | None = None,
     error_context: dict[str, Any] | None = None,
@@ -289,6 +294,8 @@ async def call_chat_completion(
         params["tools"] = tools
     if provider.request_params:
         params.update(copy.deepcopy(provider.request_params))
+    if response_format is not None:
+        params["response_format"] = copy.deepcopy(response_format)
     if provider.temperature is not None:
         params["temperature"] = provider.temperature
     if provider.top_p is not None:

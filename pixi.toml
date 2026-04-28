@@ -16,12 +16,16 @@ model-chat = "python scripts/run_model_completion.py"
 python = "3.11.*"
 pip = "*"
 
+importlib-metadata = "<8.7.0"
+
 # Numerical / plotting
 numpy = ">=1.26,<3"
 scipy = ">=1.13,<2"
 matplotlib = ">=3.9,<4"
 scikit-learn = ">=1.5,<2"
 pandas = ">=2.2,<3"
+ipykernel = ">=7.2.0,<8"
+jupyterlab = ">=4.5.6,<5"
 
 [pypi-dependencies]
 # Core libraries
@@ -37,6 +41,3 @@ dvc = { version = ">=3.65.0,<4", extras = ["s3"] }
 pytest = ">=8.2,<9"
 pre-commit = "*"
 langfuse = ">=4.0.6, <5"
-opentelemetry-api = ">=1.40.0, <2"
-opentelemetry-sdk = ">=1.40.0, <2"
-opentelemetry-exporter-otlp = ">=1.40.0, <2"
