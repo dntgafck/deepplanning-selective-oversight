@@ -1,6 +1,6 @@
-# FROZEN 2026-04-25. Do not edit without updating the freeze hash test.
-frozen_at: "2026-04-25"
+# FROZEN 2026-04-29. Do not edit without updating the freeze hash test.
+frozen_at: "2026-04-29"
 loop_similarity_threshold: 0.92
 loop_window: 5
 loop_repeat_count: 3
-coverage_threshold: 0.50
+coverage_threshold: 0.60

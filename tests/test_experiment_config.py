@@ -100,4 +100,34 @@ def test_build_system_config_loads_frozen_shopping_thresholds(
     assert config.loop_similarity_threshold == 0.92
     assert config.loop_window == 5
     assert config.loop_repeat_count == 3
-    assert config.coverage_threshold == 0.50
+    assert config.coverage_threshold == 0.60
+
+
+def test_c2_noretry_matches_c2_except_name_and_retry_cap():
+    c2 = build_system_config("C2", executor_model="qwen3.5-9b")
+    c2_noretry = build_system_config("C2-noretry", executor_model="qwen3.5-9b")
+
+    assert c2_noretry.name == "C2-noretry"
+    assert c2_noretry.final_repair_retry_cap == 0
+    assert c2.final_repair_retry_cap == 2
+
+    fields_to_compare = [
+        "oversight_enabled",
+        "oversight_mode",
+        "oversight_profile",
+        "oversight_domains",
+        "overseer_thinking",
+        "overseer_prompt_version",
+        "loop_similarity_threshold",
+        "loop_window",
+        "loop_repeat_count",
+        "coverage_threshold",
+        "recent_tool_window",
+        "inject_transient_notice",
+        "block_on_mutation_mode",
+        "max_hard_blocks_per_args",
+        "require_cited_violation_for_block",
+        "overseer_call_budget_per_task",
+    ]
+    for field_name in fields_to_compare:
+        assert getattr(c2_noretry, field_name) == getattr(c2, field_name)
