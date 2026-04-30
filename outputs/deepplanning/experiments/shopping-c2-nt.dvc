@@ -1,0 +1,6 @@
+outs:
+- md5: 13e045cf9b8fc131b0ca56f5b7dae2f9.dir
+  size: 3976440961
+  nfiles: 3066
+  hash: md5
+  path: shopping-c2-nt
