@@ -4,6 +4,8 @@ import json
 from collections.abc import Callable
 from typing import Any, Literal
 
+from llm import LLMObservability
+
 from .contracts import execution_contract_to_dict, task_checklist_to_dict
 from .json_utils import JSON_OBJECT_RESPONSE_FORMAT
 from .notices import (
@@ -24,6 +26,50 @@ def overseer_mode(system_config: Any) -> str:
         "thinking"
         if bool(getattr(system_config, "overseer_thinking", False))
         else "non-thinking"
+    )
+
+
+def _overseer_observability(
+    *,
+    provider: Any,
+    state: ConversationState,
+    system_config: Any,
+    phase: str,
+    step_index: int,
+    tool_index: int | None,
+    hook: str | None,
+    trigger_type: str,
+    allowed_actions: list[str],
+    run_id: int,
+    trace_id: str | None,
+    session_id: str | None,
+    oversight_profile: str | None,
+) -> LLMObservability | None:
+    if not hook:
+        return None
+    return LLMObservability(
+        trace_id=trace_id,
+        session_id=session_id,
+        name=f"overseer.{hook}.step_{step_index:03d}.{trigger_type}",
+        metadata={
+            "actor": "overseer",
+            "domain": "shopping",
+            "task_id": state.task_id,
+            "level": state.complexity,
+            "run_id": run_id,
+            "system": state.system_config_name,
+            "phase": phase,
+            "step_index": step_index,
+            "tool_index": tool_index,
+            "hook": hook,
+            "trigger_type": trigger_type,
+            "allowed_actions": list(allowed_actions),
+            "oversight_profile": oversight_profile
+            or getattr(system_config, "oversight_profile", None),
+            "overseer_mode": overseer_mode(system_config),
+            "model_alias": provider.alias,
+            "provider": getattr(provider, "provider", None) or "openai",
+        },
     )
 
 
@@ -111,6 +157,11 @@ async def invoke_runtime_overseer(
     allowed_actions: list[str],
     trigger_reason: str,
     trigger_evidence: dict[str, Any],
+    hook: str | None = None,
+    run_id: int = 0,
+    trace_id: str | None = None,
+    session_id: str | None = None,
+    oversight_profile: str | None = None,
     render_notice_from_action_fn: Callable[
         [Any], str | None
     ] = render_notice_from_action,
@@ -177,6 +228,21 @@ async def invoke_runtime_overseer(
             reasoning_enabled=getattr(system_config, "overseer_thinking", None),
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
             validate_nonempty=True,
+            observability=_overseer_observability(
+                provider=provider,
+                state=state,
+                system_config=system_config,
+                phase=phase,
+                step_index=step_index,
+                tool_index=tool_index,
+                hook=hook,
+                trigger_type=trigger_type,
+                allowed_actions=allowed_actions,
+                run_id=run_id,
+                trace_id=trace_id,
+                session_id=session_id,
+                oversight_profile=oversight_profile,
+            ),
         )
         cost = estimate_call_cost_fn(response=response, provider=provider)
         state.record_overseer_call(response, cost=cost)
@@ -262,6 +328,11 @@ async def invoke_final_verifier(
     phase: Literal["initial", "cart_check"],
     step_index: int,
     draft_final_answer: str,
+    hook: str | None = None,
+    run_id: int = 0,
+    trace_id: str | None = None,
+    session_id: str | None = None,
+    oversight_profile: str | None = None,
     render_notice_from_action_fn: Callable[
         [Any], str | None
     ] = render_notice_from_action,
@@ -295,6 +366,21 @@ async def invoke_final_verifier(
             reasoning_enabled=getattr(system_config, "overseer_thinking", None),
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
             validate_nonempty=True,
+            observability=_overseer_observability(
+                provider=provider,
+                state=state,
+                system_config=system_config,
+                phase=phase,
+                step_index=step_index,
+                tool_index=None,
+                hook=hook,
+                trigger_type="final_checkpoint",
+                allowed_actions=["approve", "run_verification"],
+                run_id=run_id,
+                trace_id=trace_id,
+                session_id=session_id,
+                oversight_profile=oversight_profile,
+            ),
         )
         cost = estimate_call_cost_fn(response=response, provider=provider)
         state.record_overseer_call(response, cost=cost)

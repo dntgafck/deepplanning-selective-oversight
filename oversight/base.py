@@ -22,6 +22,10 @@ class OversightContext:
     system_config: Any
     phase: OversightPhase
     task_query: str
+    run_id: int = 0
+    trace_id: str | None = None
+    session_id: str | None = None
+    oversight_profile: str | None = None
     proposed_tool_calls: list[dict[str, Any]] | None = None
     latest_tool_result: Any | None = None
     draft_final_answer: str | None = None

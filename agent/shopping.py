@@ -24,6 +24,7 @@ from failure_subtypes import (
     observation_valid_for_failure_subtype,
 )
 from llm import (
+    LLMObservability,
     build_langfuse_trace_id,
     call_chat_completion,
     estimate_call_cost,
@@ -126,6 +127,90 @@ def _build_request_messages(
             _build_transient_notice_message(str(state.pending_executor_notice))
         )
     return request_messages
+
+
+def _provider_metadata(provider: Any) -> dict[str, Any]:
+    return {
+        "model_alias": provider.alias,
+        "provider": getattr(provider, "provider", None) or "openai",
+    }
+
+
+def _executor_observability(
+    *,
+    state: ConversationState,
+    system_config: Any,
+    run_id: int,
+    phase_name: str,
+    step_index: int,
+    trace_id: str | None,
+    session_id: str | None,
+) -> LLMObservability:
+    return LLMObservability(
+        trace_id=trace_id,
+        session_id=session_id,
+        name=f"executor.{phase_name}.step_{step_index:03d}",
+        metadata={
+            "actor": "executor",
+            "domain": "shopping",
+            "task_id": state.task_id,
+            "level": state.complexity,
+            "run_id": run_id,
+            "system": state.system_config_name,
+            "phase": phase_name,
+            "step_index": step_index,
+            **_provider_metadata(system_config.executor_provider),
+        },
+    )
+
+
+def _overseer_mode_name(system_config: Any) -> str:
+    return (
+        "thinking"
+        if bool(getattr(system_config, "overseer_thinking", False))
+        else "non-thinking"
+    )
+
+
+def _overseer_setup_observability(
+    *,
+    state: ConversationState,
+    system_config: Any,
+    run_id: int,
+    trace_id: str | None,
+    session_id: str | None,
+    trigger_type: str,
+) -> LLMObservability | None:
+    provider = getattr(system_config, "overseer_provider", None)
+    if provider is None:
+        return None
+    generation_suffix = (
+        "compile_checklist"
+        if trigger_type == "compile_checklist"
+        else "compile_contract"
+    )
+    return LLMObservability(
+        trace_id=trace_id,
+        session_id=session_id,
+        name=f"overseer.{generation_suffix}",
+        metadata={
+            "actor": "overseer",
+            "domain": "shopping",
+            "task_id": state.task_id,
+            "level": state.complexity,
+            "run_id": run_id,
+            "system": state.system_config_name,
+            "phase": "setup",
+            "step_index": 0,
+            "tool_index": None,
+            "hook": "setup",
+            "trigger_type": trigger_type,
+            "allowed_actions": [],
+            "oversight_profile": getattr(system_config, "oversight_profile", None),
+            "overseer_mode": _overseer_mode_name(system_config),
+            **_provider_metadata(provider),
+        },
+    )
 
 
 def _overseer_budget_remaining(state: ConversationState, system_config: Any) -> bool:
@@ -333,6 +418,8 @@ async def _evaluate_oversight_with_budget(
     if _overseer_budget_remaining(budget_state, budget_system_config):
         if controller is None:
             controller = _resolve_shopping_oversight_controller(kwargs["system_config"])
+        kwargs.setdefault("run_id", run_id)
+        kwargs.setdefault("oversight_profile", getattr(controller, "profile", None))
         return await controller.evaluate(OversightContext(**kwargs))
     await _maybe_log_budget_exhausted(
         logger=logger,
@@ -485,6 +572,14 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     tool_schema=self.openai_tools,
                     system_config=system_config,
                     cache_root=cache_root,
+                    observability=_overseer_setup_observability(
+                        state=state,
+                        system_config=system_config,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        trigger_type="compile_contract",
+                    ),
                 )
             )
             state.execution_contract = contract
@@ -508,6 +603,14 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     execution_contract=contract,
                     system_config=system_config,
                     cache_root=cache_root,
+                    observability=_overseer_setup_observability(
+                        state=state,
+                        system_config=system_config,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        session_id=session_id,
+                        trigger_type="compile_checklist",
+                    ),
                 )
             )
             state.task_checklist = checklist
@@ -559,6 +662,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 phase="initial",
                 task_query=user_query,
                 step_index=initial_last_step,
+                trace_id=trace_id,
+                session_id=session_id,
             )
             if midpoint_action is not None:
                 state.record_oversight_decision(initial_last_step, midpoint_action)
@@ -710,8 +815,15 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                 messages=request_messages,
                 tools=self.openai_tools,
                 on_attempt_error=log_attempt_error,
-                trace_id=trace_id,
-                session_id=session_id,
+                observability=_executor_observability(
+                    state=state,
+                    system_config=system_config,
+                    run_id=run_id,
+                    phase_name=phase_name,
+                    step_index=step_count,
+                    trace_id=trace_id,
+                    session_id=session_id,
+                ),
             )
             ended_at = time.time()
             if notice_injected:
@@ -748,6 +860,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                     task_query=task_query,
                     proposed_tool_calls=calls,
                     step_index=step_count,
+                    trace_id=trace_id,
+                    session_id=session_id,
                 )
                 if pre_tool_action is not None:
                     h1_outcome = H1Outcome.APPROVE_CONTINUE
@@ -908,6 +1022,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         task_query=task_query,
                         draft_final_answer=str(assistant_payload.get("content") or ""),
                         step_index=step_count,
+                        trace_id=trace_id,
+                        session_id=session_id,
                     )
                     if final_action is not None:
                         state.record_oversight_decision(step_count, final_action)
@@ -1070,6 +1186,8 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                         latest_tool_result=tool_result,
                         step_index=step_count,
                         tool_index=tool_index,
+                        trace_id=trace_id,
+                        session_id=session_id,
                     )
                     if post_tool_action is not None:
                         state.record_oversight_decision(
@@ -1229,6 +1347,7 @@ async def run_agent_inference_async(
     async def process_sample(sample: object, run_id: int) -> dict[str, Any]:
         sample = dict(sample)
         sample_id = str(sample.get("id", "unknown"))
+        sample_level = str(sample.get("level", "unknown") or "unknown")
         query = str(sample.get("query", ""))
         run_database_dir = resolve_run_database_dir(run_id)
         logger = get_logger(run_id)
@@ -1241,8 +1360,10 @@ async def run_agent_inference_async(
             session_id,
             "shopping",
             model,
-            run_id,
-            sample_id,
+            system,
+            f"run_{run_id}",
+            f"level_{sample_level}",
+            f"sample_{sample_id}",
         )
         case_snapshot = (
             _prepare_case_retry_snapshot(run_database_dir, sample_id)

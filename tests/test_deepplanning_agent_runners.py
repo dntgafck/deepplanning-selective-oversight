@@ -217,6 +217,8 @@ def _install_c2_lite_mocks(
     compiler_responses: list[FakeResponse] | None = None,
     overseer_responses: list[FakeResponse] | None = None,
     captured_executor_calls: list[dict[str, object]] | None = None,
+    captured_compiler_calls: list[dict[str, object]] | None = None,
+    captured_overseer_calls: list[dict[str, object]] | None = None,
 ) -> None:
     monkeypatch.setattr(
         shopping_module,
@@ -231,13 +233,14 @@ def _install_c2_lite_mocks(
             or [
                 _fake_json_response(_shopping_contract_payload()),
                 _fake_json_response(_shopping_checklist_payload()),
-            ]
+            ],
+            captured_compiler_calls,
         ),
     )
     monkeypatch.setattr(
         oversight_module,
         "call_chat_completion",
-        _fake_completion_factory(overseer_responses or []),
+        _fake_completion_factory(overseer_responses or [], captured_overseer_calls),
     )
 
 
@@ -1752,6 +1755,149 @@ def test_final_checkpoint_blocks_commit_until_approved(monkeypatch, tmp_path):
     )
 
 
+def test_shopping_observability_uses_one_trace_for_executor_and_oversight(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+
+    captured_executor_calls: list[dict[str, object]] = []
+    captured_compiler_calls: list[dict[str, object]] = []
+    captured_overseer_calls: list[dict[str, object]] = []
+    _install_c2_lite_mocks(
+        monkeypatch,
+        executor_responses=[
+            FakeResponse(
+                content="",
+                tool_calls=[
+                    FakeToolCall(
+                        "call_1",
+                        "search_products",
+                        '{"query":"laptop"}',
+                    )
+                ],
+                prompt_tokens=10,
+                completion_tokens=4,
+                finish_reason="tool_calls",
+            ),
+            FakeResponse(
+                content="Phase one complete.",
+                prompt_tokens=11,
+                completion_tokens=5,
+            ),
+            FakeResponse(
+                content="Final answer.",
+                prompt_tokens=12,
+                completion_tokens=6,
+            ),
+        ],
+        overseer_responses=[
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "decision_summary": "Mutation approved.",
+                    "block_current_tool": False,
+                    "guidance_lines": [],
+                    "corrected_observation": None,
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+            _fake_json_response(
+                {
+                    "action": "approve",
+                    "pass": True,
+                    "decision_summary": "Final answer approved.",
+                    "blockers": [],
+                    "next_step_notice_lines": [],
+                    "violated_contract_ids": [],
+                    "unmet_checklist_keys": [],
+                }
+            ),
+        ],
+        captured_executor_calls=captured_executor_calls,
+        captured_compiler_calls=captured_compiler_calls,
+        captured_overseer_calls=captured_overseer_calls,
+    )
+    monkeypatch.setattr(
+        shopping_module.ShoppingAgentRunner,
+        "_exec_tool",
+        lambda self, name, arguments: "FAILED: invalid query",
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="C2",
+    )
+    system_config = build_system_config("C2", executor_model="qwen3.5-9b", max_steps=3)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="buy a laptop",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            run_id=7,
+            sample_id="1",
+            shared_oversight_cache_root=tmp_path / "cache",
+            trace_id="task-trace",
+            session_id="experiment-session",
+        )
+    )
+
+    assert result.output == "Final answer."
+
+    executor_obs = [call["observability"] for call in captured_executor_calls]
+    compiler_obs = [call["observability"] for call in captured_compiler_calls]
+    overseer_obs = [call["observability"] for call in captured_overseer_calls]
+    all_obs = executor_obs + compiler_obs + overseer_obs
+
+    assert {item.trace_id for item in all_obs} == {"task-trace"}
+    assert {item.session_id for item in all_obs} == {"experiment-session"}
+    assert [item.name for item in executor_obs] == [
+        "executor.initial.step_001",
+        "executor.initial.step_002",
+        "executor.cart_check.step_001",
+    ]
+    assert [item.name for item in compiler_obs] == [
+        "overseer.compile_contract",
+        "overseer.compile_checklist",
+    ]
+    assert [item.name for item in overseer_obs] == [
+        "overseer.post_tool.step_001.error_occurrence",
+        "overseer.final.step_001.final_checkpoint",
+    ]
+    assert {item.metadata["actor"] for item in executor_obs} == {"executor"}
+    assert {item.metadata["actor"] for item in compiler_obs + overseer_obs} == {
+        "overseer"
+    }
+    assert overseer_obs[0].metadata["hook"] == "post_tool"
+    assert overseer_obs[0].metadata["trigger_type"] == "error_occurrence"
+    assert overseer_obs[0].metadata["allowed_actions"] == [
+        "provide_guidance",
+        "correct_observation",
+    ]
+    assert overseer_obs[1].metadata["hook"] == "final"
+    assert overseer_obs[1].metadata["trigger_type"] == "final_checkpoint"
+    assert overseer_obs[1].metadata["allowed_actions"] == [
+        "approve",
+        "run_verification",
+    ]
+    assert compiler_obs[0].metadata["hook"] == "setup"
+    assert compiler_obs[1].metadata["trigger_type"] == "compile_checklist"
+    assert all(item.metadata["domain"] == "shopping" for item in all_obs)
+    assert all(item.metadata["level"] == 1 for item in all_obs)
+    assert all(item.metadata["run_id"] == 7 for item in all_obs)
+
+
 def test_final_checkpoint_stale_cart_precheck_forces_get_cart_info_first(
     monkeypatch, tmp_path
 ):
@@ -2258,13 +2404,22 @@ def test_shopping_run_agent_inference_scopes_trace_per_case(monkeypatch, tmp_pat
     )
 
     assert results["success"] == 2
-    assert [call["trace_id"] for call in captured_calls] == [
-        "bench-session|shopping|qwen-plus|0|1",
-        "bench-session|shopping|qwen-plus|0|1",
-        "bench-session|shopping|qwen-plus|0|10",
-        "bench-session|shopping|qwen-plus|0|10",
+    observability = [call["observability"] for call in captured_calls]
+    assert [item.trace_id for item in observability] == [
+        "bench-session|shopping|qwen-plus|A|run_0|level_1|sample_1",
+        "bench-session|shopping|qwen-plus|A|run_0|level_1|sample_1",
+        "bench-session|shopping|qwen-plus|A|run_0|level_1|sample_10",
+        "bench-session|shopping|qwen-plus|A|run_0|level_1|sample_10",
     ]
-    assert {call["session_id"] for call in captured_calls} == {"bench-session"}
+    assert {item.session_id for item in observability} == {"bench-session"}
+    assert {item.metadata["level"] for item in observability} == {1}
+    assert [item.name for item in observability] == [
+        "executor.initial.step_001",
+        "executor.cart_check.step_001",
+        "executor.initial.step_001",
+        "executor.cart_check.step_001",
+    ]
+    assert {item.metadata["actor"] for item in observability} == {"executor"}
 
 
 def test_shopping_run_agent_inference_logs_structured_task_error(monkeypatch, tmp_path):

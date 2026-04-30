@@ -1,4 +1,5 @@
 from .client import (
+    LLMObservability,
     PricingConfig,
     ProviderConfig,
     build_langfuse_session_id,
@@ -12,6 +13,7 @@ from .client import (
 from .pricing import PricingBreakdown, extract_usage_breakdown
 
 __all__ = [
+    "LLMObservability",
     "PricingBreakdown",
     "PricingConfig",
     "ProviderConfig",

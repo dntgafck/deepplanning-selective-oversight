@@ -92,6 +92,14 @@ class PricingConfig:
     prices: dict[str, float | None] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class LLMObservability:
+    trace_id: str | None = None
+    session_id: str | None = None
+    name: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class ProviderConfig:
     alias: str
@@ -239,6 +247,40 @@ def build_langfuse_trace_id(*parts: object) -> str:
     return Langfuse.create_trace_id(seed=seed)
 
 
+def _resolve_observability(
+    observability: LLMObservability | None,
+    *,
+    trace_id: str | None,
+    session_id: str | None,
+    name: str | None,
+    metadata: dict[str, Any] | None,
+) -> LLMObservability:
+    merged_metadata: dict[str, Any] = {}
+    if observability is not None:
+        merged_metadata.update(copy.deepcopy(observability.metadata))
+    if metadata:
+        merged_metadata.update(copy.deepcopy(metadata))
+
+    return LLMObservability(
+        trace_id=(
+            observability.trace_id
+            if observability is not None and observability.trace_id is not None
+            else trace_id
+        ),
+        session_id=(
+            observability.session_id
+            if observability is not None and observability.session_id is not None
+            else session_id
+        ),
+        name=(
+            observability.name
+            if observability is not None and observability.name is not None
+            else name
+        ),
+        metadata=merged_metadata,
+    )
+
+
 def flush_langfuse() -> None:
     if not _langfuse_enabled():
         return
@@ -277,6 +319,9 @@ async def call_chat_completion(
     error_context: dict[str, Any] | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
+    observability: LLMObservability | None = None,
+    name: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Any:
     import openai
 
@@ -314,14 +359,23 @@ async def call_chat_completion(
     if extra_body:
         params["extra_body"] = extra_body
 
+    resolved_observability = _resolve_observability(
+        observability,
+        trace_id=trace_id,
+        session_id=session_id,
+        name=name,
+        metadata=metadata,
+    )
+
     if _langfuse_enabled():
-        params["name"] = "deepplanning-chat-completion"
+        params["name"] = resolved_observability.name or "deepplanning-chat-completion"
         params["metadata"] = {
+            **resolved_observability.metadata,
             "model_alias": provider.alias,
             "provider": provider.provider or "openai",
         }
-        if trace_id:
-            params["trace_id"] = trace_id
+        if resolved_observability.trace_id:
+            params["trace_id"] = resolved_observability.trace_id
 
     max_attempts = max(provider.max_retries, 1)
     retryable_exceptions = _retryable_exception_types(openai)
@@ -344,8 +398,8 @@ async def call_chat_completion(
             client = _build_async_client(provider, api_key)
             async with client:
                 scope = (
-                    propagate_attributes(session_id=session_id)
-                    if _langfuse_enabled() and session_id
+                    propagate_attributes(session_id=resolved_observability.session_id)
+                    if _langfuse_enabled() and resolved_observability.session_id
                     else contextlib.nullcontext()
                 )
                 with scope:

@@ -8,7 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from llm import call_chat_completion
+from llm import LLMObservability, call_chat_completion
 
 from .domain_config import load_product_type_hints
 from .json_utils import JSON_OBJECT_RESPONSE_FORMAT, extract_json_object_content
@@ -843,6 +843,7 @@ async def _compile_execution_contract(
     executor_system_prompt: str,
     tool_schema: Any,
     system_config: SystemConfig,
+    observability: LLMObservability | None = None,
 ) -> ExecutionContract:
     if system_config.overseer_provider is None:
         raise ValueError("Adaptive oversight requires an overseer provider")
@@ -896,6 +897,7 @@ async def _compile_execution_contract(
             reasoning_enabled=system_config.overseer_thinking,
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
             validate_nonempty=True,
+            observability=observability,
         )
         try:
             payload = _strict_json_content(
@@ -927,6 +929,7 @@ async def _compile_task_checklist(
     task_query: str,
     execution_contract: ExecutionContract,
     system_config: SystemConfig,
+    observability: LLMObservability | None = None,
 ) -> TaskChecklist:
     if system_config.overseer_provider is None:
         raise ValueError("Adaptive oversight requires an overseer provider")
@@ -1000,6 +1003,7 @@ async def _compile_task_checklist(
             reasoning_enabled=system_config.overseer_thinking,
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
             validate_nonempty=True,
+            observability=observability,
         )
         try:
             payload = _strict_json_content(
@@ -1043,6 +1047,7 @@ async def load_or_build_execution_contract_with_metadata(
     tool_schema: Any,
     system_config: SystemConfig,
     cache_root: Path,
+    observability: LLMObservability | None = None,
 ) -> tuple[ExecutionContract, str, str]:
     compiler_signature = _compiler_signature(system_config)
     cache_key = make_contract_cache_key(
@@ -1064,6 +1069,7 @@ async def load_or_build_execution_contract_with_metadata(
         executor_system_prompt=executor_system_prompt,
         tool_schema=tool_schema,
         system_config=system_config,
+        observability=observability,
     )
     wrote_file = _write_json_atomic(path, execution_contract_to_dict(contract))
     status = "built" if wrote_file else "hit"
@@ -1081,6 +1087,7 @@ async def load_or_build_task_checklist_with_metadata(
     execution_contract: ExecutionContract,
     system_config: SystemConfig,
     cache_root: Path,
+    observability: LLMObservability | None = None,
 ) -> tuple[TaskChecklist, str, str]:
     cache_key = make_checklist_cache_key(
         task_id=task_id,
@@ -1114,6 +1121,7 @@ async def load_or_build_task_checklist_with_metadata(
         task_query=task_query,
         execution_contract=execution_contract,
         system_config=system_config,
+        observability=observability,
     )
     wrote_file = _write_json_atomic(path, task_checklist_to_dict(checklist))
     if checklist.checklist_id.startswith(FALLBACK_CHECKLIST_ID_PREFIX):

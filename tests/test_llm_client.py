@@ -975,6 +975,54 @@ def test_call_chat_completion_forwards_trace_id_when_langfuse_enabled(monkeypatc
     }
 
 
+def test_call_chat_completion_merges_observability_metadata_when_langfuse_enabled(
+    monkeypatch,
+):
+    captured_params: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs):
+        captured_params.append(kwargs)
+        return FakeResponse(content="done")
+
+    monkeypatch.setattr(llm_client, "_langfuse_enabled", lambda: True)
+    monkeypatch.setattr(
+        llm_client,
+        "_build_async_client",
+        lambda provider, api_key: FakeAsyncClient(fake_create),
+    )
+    provider = llm_client.ProviderConfig(
+        alias="canonical-alias",
+        model="test-model",
+        provider="openai-compatible",
+    )
+
+    asyncio.run(
+        llm_client.call_chat_completion(
+            provider=provider,
+            messages=[{"role": "user", "content": "hello"}],
+            observability=llm_client.LLMObservability(
+                trace_id="task-trace",
+                name="executor.initial.step_001",
+                metadata={
+                    "actor": "executor",
+                    "model_alias": "caller-alias",
+                    "provider": "caller-provider",
+                },
+            ),
+            metadata={"phase": "initial"},
+        )
+    )
+
+    assert captured_params[0]["trace_id"] == "task-trace"
+    assert captured_params[0]["name"] == "executor.initial.step_001"
+    assert captured_params[0]["metadata"] == {
+        "actor": "executor",
+        "phase": "initial",
+        "model_alias": "canonical-alias",
+        "provider": "openai-compatible",
+    }
+
+
 def test_call_chat_completion_propagates_session_id_when_langfuse_enabled(monkeypatch):
     captured_params: list[dict[str, object]] = []
     propagation_calls: list[dict[str, object]] = []
