@@ -1,0 +1,6 @@
+outs:
+- md5: 3f1f87d3e2d9ea440dc10e1b118464fa.dir
+  size: 3545017750
+  nfiles: 3067
+  hash: md5
+  path: shopping-c2-noretry

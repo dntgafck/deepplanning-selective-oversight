@@ -1,0 +1,6 @@
+outs:
+- md5: 178d28ebf9299266fad087adbae3be98.dir
+  size: 5021334617
+  nfiles: 3066
+  hash: md5
+  path: shopping-c2

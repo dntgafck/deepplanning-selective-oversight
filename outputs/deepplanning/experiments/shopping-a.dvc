@@ -1,0 +1,6 @@
+outs:
+- md5: a2e177ab8c3a0aa6d32b09baa0c25c34.dir
+  size: 3749557454
+  nfiles: 2943
+  hash: md5
+  path: shopping-a
