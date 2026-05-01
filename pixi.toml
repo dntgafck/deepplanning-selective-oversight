@@ -10,6 +10,8 @@ lint-all = "pre-commit run --all-files"
 test = "pytest"
 deepplanning-experiment = "python scripts/run_experiment.py"
 model-chat = "python scripts/run_model_completion.py"
+langfuse-session-usage = "python scripts/fetch_langfuse_session_usage.py"
+langfuse-results-usage = "python scripts/export_langfuse_results_usage.py"
 
 [dependencies]
 # Core runtime

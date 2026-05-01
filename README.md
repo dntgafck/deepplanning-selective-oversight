@@ -214,6 +214,31 @@ pixi run dvc repro deepplanning_data
 pixi run deepplanning-experiment -- experiment=system_a_smoke
 ```
 
+### Langfuse session usage
+
+With `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in the root `.env` or
+environment, summarize token usage for a Langfuse session by model:
+
+```bash
+pixi run langfuse-session-usage -- <session-id>
+pixi run langfuse-session-usage -- <session-id> --output outputs/langfuse/session-usage.csv
+```
+
+The command defaults to `https://cloud.langfuse.com`; set `LANGFUSE_HOST` to use
+another Langfuse host.
+
+To export one CSV that joins timestamp-session Langfuse token usage with local
+aggregate metrics for benchmark result sessions:
+
+```bash
+pixi run langfuse-results-usage
+```
+
+This writes `outputs/deepplanning/langfuse-results-usage.csv` by default. It
+scans `shopping-*` and `system-*` result directories, skips `shopping-b` and
+metadata `system=B`, and uses each timestamp directory name as the Langfuse
+session id.
+
 Shopping is the primary and default v1 oversight domain. The frozen Shopping
 split is selected with `shopping.split=tune|test|all`: calibration and tuning
 use `shopping.split=tune`, held-out reporting uses `shopping.split=test`, and
