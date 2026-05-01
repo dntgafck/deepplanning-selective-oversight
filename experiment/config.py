@@ -3,10 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from omegaconf import OmegaConf
-
 from deepplanning.config import (
-    CONFIG_ROOT,
     available_system_names,
     load_system_defaults,
 )
@@ -28,13 +25,6 @@ _OVERSIGHT_MODE_BY_PROFILE = {
 }
 _VALID_OVERSIGHT_PROFILES = frozenset(_OVERSIGHT_MODE_BY_PROFILE)
 _VALID_OVERSIGHT_MODES = frozenset(_OVERSIGHT_PROFILE_BY_MODE)
-SHOPPING_THRESHOLDS_PATH = CONFIG_ROOT / "shopping" / "oversight_thresholds.yaml"
-_SHOPPING_THRESHOLD_KEYS = (
-    "loop_similarity_threshold",
-    "loop_window",
-    "loop_repeat_count",
-    "coverage_threshold",
-)
 
 
 @dataclass(slots=True)
@@ -131,20 +121,6 @@ def system_config_with_seed_override(
     )
 
 
-def _load_frozen_shopping_thresholds(
-    path: Any = SHOPPING_THRESHOLDS_PATH,
-) -> dict[str, Any]:
-    threshold_path = CONFIG_ROOT / path if isinstance(path, str) else path
-    if not threshold_path.exists():
-        return {}
-    payload = OmegaConf.to_container(OmegaConf.load(threshold_path), resolve=True)
-    if not isinstance(payload, dict):
-        raise ValueError(
-            f"Frozen Shopping thresholds must be a mapping: {threshold_path}"
-        )
-    return {key: payload[key] for key in _SHOPPING_THRESHOLD_KEYS if key in payload}
-
-
 def _string_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
     if value is None:
         return default
@@ -207,14 +183,18 @@ def build_system_config(
     overseer_model: str = "deepseek-v4-flash",
     max_steps: int = 400,
     num_runs: int = 1,
+    system_defaults: dict[str, Any] | None = None,
 ) -> SystemConfig:
-    try:
-        defaults = load_system_defaults(system_name)
-    except ValueError as exc:
-        available = ", ".join(available_system_names())
-        raise ValueError(
-            f"Unknown system '{system_name}'. Available: {available}"
-        ) from exc
+    if system_defaults is None:
+        try:
+            defaults = load_system_defaults(system_name)
+        except ValueError as exc:
+            available = ", ".join(available_system_names())
+            raise ValueError(
+                f"Unknown system '{system_name}'. Available: {available}"
+            ) from exc
+    else:
+        defaults = dict(system_defaults)
 
     oversight_enabled = bool(defaults["oversight_enabled"])
     overseer_provider = None
@@ -225,7 +205,6 @@ def build_system_config(
         defaults,
         profile=oversight_profile,
     )
-    frozen_thresholds = _load_frozen_shopping_thresholds()
     domain_config = load_oversight_domain_config("shopping")
     product_type_hints_enabled = bool(
         defaults.get(
@@ -255,26 +234,11 @@ def build_system_config(
             defaults.get("overseer_prompt_version", "c2-lite-v1.3")
         ),
         loop_similarity_threshold=float(
-            frozen_thresholds.get(
-                "loop_similarity_threshold",
-                defaults.get("loop_similarity_threshold", 0.92),
-            )
+            defaults.get("loop_similarity_threshold", 0.92)
         ),
-        loop_window=int(
-            frozen_thresholds.get("loop_window", defaults.get("loop_window", 5))
-        ),
-        loop_repeat_count=int(
-            frozen_thresholds.get(
-                "loop_repeat_count",
-                defaults.get("loop_repeat_count", 3),
-            )
-        ),
-        coverage_threshold=float(
-            frozen_thresholds.get(
-                "coverage_threshold",
-                defaults.get("coverage_threshold", 0.50),
-            )
-        ),
+        loop_window=int(defaults.get("loop_window", 5)),
+        loop_repeat_count=int(defaults.get("loop_repeat_count", 3)),
+        coverage_threshold=float(defaults.get("coverage_threshold", 0.50)),
         final_repair_retry_cap=int(defaults.get("final_repair_retry_cap", 2)),
         max_stale_cart_notices=int(defaults.get("max_stale_cart_notices", 1)),
         recent_tool_window=int(defaults.get("recent_tool_window", 5)),

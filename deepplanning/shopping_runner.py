@@ -164,6 +164,7 @@ def run(
     runs: int = 4,
     output_root: str | Path | None = None,
     langfuse_session_id: str | None = None,
+    system_defaults: dict[str, Any] | None = None,
 ) -> None:
     load_dotenv()
     evaluation_pipeline, score_statistics = import_modules()
@@ -267,6 +268,7 @@ def run(
                 infra_retry_limit=int(infra_retry_limit),
                 runs=run_count,
                 system=str(system),
+                system_defaults=system_defaults,
                 database_dir_by_run=run_database_dirs,
                 output_dir_by_run=run_output_dirs,
                 per_run_seed_by_run=per_run_seed_by_run,

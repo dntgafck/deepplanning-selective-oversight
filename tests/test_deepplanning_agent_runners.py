@@ -2790,6 +2790,7 @@ def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(
         overseer_model: str = "deepseek-v4-flash",
         max_steps: int = 400,
         num_runs: int = 1,
+        system_defaults: dict[str, object] | None = None,
     ):
         captured.update(
             {
@@ -2798,6 +2799,7 @@ def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(
                 "overseer_model": overseer_model,
                 "max_steps": max_steps,
                 "num_runs": num_runs,
+                "system_defaults": system_defaults,
             }
         )
         return SimpleNamespace(
@@ -2835,6 +2837,7 @@ def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(
         max_llm_calls=7,
         runs=2,
         system="C2",
+        system_defaults={"name": "C2", "coverage_threshold": 0.11},
     )
 
     assert results["total"] == 0
@@ -2844,6 +2847,7 @@ def test_shopping_run_agent_inference_threads_overseer_model_to_system_config(
         "overseer_model": "qwen-plus",
         "max_steps": 7,
         "num_runs": 2,
+        "system_defaults": {"name": "C2", "coverage_threshold": 0.11},
     }
 
 
@@ -3539,6 +3543,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
                 "langfuse_session_id": kwargs["langfuse_session_id"],
                 "overseer_model": kwargs["overseer_model"],
                 "split": kwargs["split"],
+                "system_defaults": kwargs["system_defaults"],
             }
         ),
     )
@@ -3549,6 +3554,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
             {
                 "output_root": kwargs["output_root"],
                 "langfuse_session_id": kwargs["langfuse_session_id"],
+                "system_defaults": kwargs["system_defaults"],
             }
         ),
     )
@@ -3563,7 +3569,11 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
         {
             "domains": ["travel", "shopping"],
             "models": {"executor": "qwen3-14b", "overseer": "deepseek-v4-flash"},
-            "system": {"name": "A"},
+            "system": {
+                "name": "C2",
+                "loop_similarity_threshold": 0.99,
+                "coverage_threshold": 0.11,
+            },
             "runtime": {"workers": 1, "max_llm_calls": 20, "runs": 4},
             "shopping": {"levels": [1], "split": "test", "sample_ids": []},
             "travel": {
@@ -3585,12 +3595,22 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
             "langfuse_session_id": "bench-session",
             "overseer_model": "deepseek-v4-flash",
             "split": "test",
+            "system_defaults": {
+                "name": "C2",
+                "loop_similarity_threshold": 0.99,
+                "coverage_threshold": 0.11,
+            },
         }
     ]
     assert travel_calls == [
         {
             "output_root": Path("/tmp") / "bench-session" / "travel",
             "langfuse_session_id": "bench-session",
+            "system_defaults": {
+                "name": "C2",
+                "loop_similarity_threshold": 0.99,
+                "coverage_threshold": 0.11,
+            },
         }
     ]
     assert aggregate_roots == [Path("/tmp") / "bench-session"]
@@ -3709,6 +3729,8 @@ def test_real_hydra_composes_shopping_tune_sanity_preset():
     assert list(cfg.domains) == ["shopping"]
     assert str(cfg.shopping.split) == "tune"
     assert str(cfg.system.name) == "C2"
+    assert float(cfg.system.loop_similarity_threshold) == 0.92
+    assert float(cfg.system.coverage_threshold) == 0.60
     assert int(cfg.runtime.runs) == 1
 
 

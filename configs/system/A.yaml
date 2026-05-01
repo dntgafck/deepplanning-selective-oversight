@@ -4,3 +4,7 @@ oversight_profile: executor_only
 oversight_domains:
   - shopping
 overseer_thinking: null
+loop_similarity_threshold: 0.92
+loop_window: 5
+loop_repeat_count: 3
+coverage_threshold: 0.60

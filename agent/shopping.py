@@ -1274,6 +1274,7 @@ async def run_agent_inference_async(
     shared_oversight_cache_root: Path | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
+    system_defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     with test_data_path.open("r", encoding="utf-8") as fh:
         test_data = json.load(fh)
@@ -1319,6 +1320,7 @@ async def run_agent_inference_async(
         overseer_model=overseer_model,
         max_steps=max_llm_calls,
         num_runs=runs,
+        system_defaults=system_defaults,
     )
     started_at = time.time()
     loggers: dict[int, StructuredLogger] = {}
@@ -1575,6 +1577,7 @@ def run_agent_inference(
     shared_oversight_cache_root: Path | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
+    system_defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     async def _run_with_cleanup() -> dict[str, Any]:
         try:
@@ -1598,6 +1601,7 @@ def run_agent_inference(
                 shared_oversight_cache_root=shared_oversight_cache_root,
                 trace_id=trace_id,
                 session_id=session_id,
+                system_defaults=system_defaults,
             )
         finally:
             flush_langfuse()

@@ -332,6 +332,7 @@ def run_language(
     eval_converted: object,
     base_seed: int | None = None,
     langfuse_session_id: str | None = None,
+    system_defaults: dict[str, Any] | None = None,
 ) -> None:
     database_dir = TRAVEL_DATA_ROOT / f"database_{language}"
     if not database_dir.exists():
@@ -382,6 +383,7 @@ def run_language(
             infra_retry_limit=int(getattr(cfg, "infra_retry_limit", 2)),
             runs=runs,
             system=system,
+            system_defaults=system_defaults,
             output_dir_by_run=run_output_dirs,
             per_run_seed_by_run=_build_per_run_seed_by_run(base_seed, runs),
             session_id=langfuse_session_id,
@@ -497,6 +499,7 @@ def run(
     verbose: bool = False,
     debug: bool = False,
     langfuse_session_id: str | None = None,
+    system_defaults: dict[str, Any] | None = None,
 ) -> None:
     load_dotenv()
     convert_report, eval_converted = import_modules()
@@ -539,4 +542,5 @@ def run(
                     else None
                 ),
                 langfuse_session_id=langfuse_session_id,
+                system_defaults=system_defaults,
             )

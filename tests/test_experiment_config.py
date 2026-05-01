@@ -78,7 +78,7 @@ def test_build_system_config_reads_oversight_domains():
     assert config.oversight_domains == ("shopping",)
 
 
-def test_build_system_config_loads_frozen_shopping_thresholds(
+def test_build_system_config_reads_thresholds_from_system_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -97,10 +97,32 @@ def test_build_system_config_loads_frozen_shopping_thresholds(
 
     config = build_system_config("C2-test", executor_model="qwen3.5-9b")
 
-    assert config.loop_similarity_threshold == 0.92
-    assert config.loop_window == 5
-    assert config.loop_repeat_count == 3
-    assert config.coverage_threshold == 0.60
+    assert config.loop_similarity_threshold == 0.01
+    assert config.loop_window == 1
+    assert config.loop_repeat_count == 1
+    assert config.coverage_threshold == 0.01
+
+
+def test_build_system_config_uses_resolved_system_payload_for_runtime_overrides():
+    config = build_system_config(
+        "C2",
+        executor_model="qwen3.5-9b",
+        system_defaults={
+            "name": "C2",
+            "oversight_enabled": True,
+            "oversight_profile": "adaptive_risk",
+            "loop_similarity_threshold": 0.99,
+            "loop_window": 7,
+            "loop_repeat_count": 4,
+            "coverage_threshold": 0.11,
+            "oversight_domains": ["shopping"],
+        },
+    )
+
+    assert config.loop_similarity_threshold == 0.99
+    assert config.loop_window == 7
+    assert config.loop_repeat_count == 4
+    assert config.coverage_threshold == 0.11
 
 
 def test_c2_noretry_matches_c2_except_name_and_retry_cap():

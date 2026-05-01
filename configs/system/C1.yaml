@@ -6,6 +6,10 @@ oversight_domains:
   - shopping
 overseer_thinking: true
 overseer_prompt_version: c2-lite-v1.4-frozen
+loop_similarity_threshold: 0.92
+loop_window: 5
+loop_repeat_count: 3
+coverage_threshold: 0.60
 irreversible_tools: []
 block_on_mutation_mode: auto
 max_hard_blocks_per_args: 2

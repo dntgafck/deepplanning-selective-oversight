@@ -289,7 +289,8 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
     runtime_cfg = OmegaConf.to_container(cfg.runtime, resolve=True) or {}
     shopping_cfg = OmegaConf.to_container(cfg.shopping, resolve=True) or {}
     travel_cfg = OmegaConf.to_container(cfg.travel, resolve=True) or {}
-    system_name = str(cfg.system.name)
+    system_cfg = OmegaConf.to_container(cfg.system, resolve=True) or {}
+    system_name = str(system_cfg.get("name", cfg.system.name))
     langfuse_session_id = _build_langfuse_session_id(output_root)
 
     domain_names = _domain_names(cfg)
@@ -304,6 +305,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             split=str(shopping_cfg.get("split", "all") or "all"),
             sample_ids=shopping_cfg.get("sample_ids"),
             system=system_name,
+            system_defaults=system_cfg,
             workers=int(runtime_cfg.get("workers", 20)),
             max_llm_calls=int(runtime_cfg.get("max_llm_calls", 400)),
             infra_retry_limit=int(runtime_cfg.get("infra_retry_limit", 2)),
@@ -318,6 +320,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             language=travel_cfg.get("language"),
             sample_ids=travel_cfg.get("sample_ids"),
             system=system_name,
+            system_defaults=system_cfg,
             workers=int(runtime_cfg.get("workers", 20)),
             max_llm_calls=int(runtime_cfg.get("max_llm_calls", 400)),
             infra_retry_limit=int(runtime_cfg.get("infra_retry_limit", 2)),
