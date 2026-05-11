@@ -1,0 +1,6 @@
+outs:
+- md5: 26f58ed190c48cd29ffb8b37401ed78e.dir
+  size: 1604371095
+  nfiles: 3194
+  hash: md5
+  path: shopping-c2-deepseek
