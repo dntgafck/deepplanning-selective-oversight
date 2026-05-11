@@ -43,3 +43,4 @@ dvc = { version = ">=3.65.0,<4", extras = ["s3"] }
 pytest = ">=8.2,<9"
 pre-commit = "*"
 langfuse = ">=4.0.6, <5"
+seaborn = ">=0.13.2, <0.14"
