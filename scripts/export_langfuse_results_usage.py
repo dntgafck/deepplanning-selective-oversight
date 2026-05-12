@@ -153,7 +153,9 @@ def _is_count_metric(metric_name: str) -> bool:
 
 
 def aggregate_metrics(session_root: Path) -> dict[str, Any]:
-    aggregate_paths = sorted((session_root / "aggregated_results").glob("*_aggregated.json"))
+    aggregate_paths = sorted(
+        (session_root / "aggregated_results").glob("*_aggregated.json")
+    )
     metric_values: dict[str, list[float]] = {}
     run_ids: set[int] = set()
     model_names: set[str] = set()
@@ -233,9 +235,7 @@ def _usage_totals(usage_summary: pd.DataFrame) -> dict[str, Any]:
     return {
         "langfuse_models": ",".join(str(model) for model in usage_summary["model"]),
         "langfuse_input_tokens": int(usage_summary["input"].sum()),
-        "langfuse_input_cached_tokens": int(
-            usage_summary["input_cached_tokens"].sum()
-        ),
+        "langfuse_input_cached_tokens": int(usage_summary["input_cached_tokens"].sum()),
         "langfuse_output_tokens": int(usage_summary["output"].sum()),
         "langfuse_total_tokens": int(usage_summary["total"].sum()),
         "langfuse_usage_by_model_json": json.dumps(records, sort_keys=True),

@@ -1,0 +1,6 @@
+outs:
+- md5: 8a0a8d76ca627c7c9e0f8e7ab3294b98.dir
+  size: 758398014
+  nfiles: 8
+  hash: md5
+  path: lora_sft

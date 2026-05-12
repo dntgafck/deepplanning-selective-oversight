@@ -62,7 +62,11 @@ def _write_session(
                 "shopping_weighted_average_case_score": (40 + run_id) / 120,
             },
         }
-        (session_root / "aggregated_results" / f"{executor}_run_{run_id}_aggregated.json").write_text(
+        (
+            session_root
+            / "aggregated_results"
+            / f"{executor}_run_{run_id}_aggregated.json"
+        ).write_text(
             json.dumps(aggregate),
             encoding="utf-8",
         )

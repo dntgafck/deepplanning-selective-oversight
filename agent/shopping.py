@@ -315,6 +315,7 @@ async def _log_oversight_step(
     executor_output_tokens: int,
     executor_cost: float | None,
     failure_subtype: str | None = None,
+    draft_final_answer: str | None = None,
 ) -> None:
     if logger is None:
         return
@@ -324,53 +325,53 @@ async def _log_oversight_step(
         if executor_cost is None or overseer_cost is None
         else executor_cost + overseer_cost
     )
-    await logger.log_event(
-        "oversight_step",
-        {
-            "domain": "shopping",
-            "task_id": state.task_id,
-            "run_id": run_id,
-            "phase": phase,
-            "step_index": step_index,
-            "tool_index": tool_index,
-            "trigger_type": getattr(action, "trigger_type", None),
-            "trigger_reason": getattr(action, "trigger_reason", None),
-            "intervention_type": getattr(action, "intervention_type", None),
-            "overseer_invoked": bool(getattr(action, "overseer_invoked", False)),
-            "overseer_mode": getattr(action, "overseer_mode", "disabled"),
-            "executor_input_tokens": executor_input_tokens,
-            "executor_output_tokens": executor_output_tokens,
-            "overseer_input_tokens": getattr(action, "overseer_input_tokens", 0),
-            "overseer_output_tokens": getattr(action, "overseer_output_tokens", 0),
-            "executor_cost": executor_cost,
-            "overseer_cost": overseer_cost,
-            "total_cost": total_cost,
-            "failure_subtype": failure_subtype,
-            "loop_signature": getattr(action, "loop_signature", None),
-            "coverage_status": getattr(action, "coverage_status", None),
-            "raw_overseer_text": getattr(action, "raw_overseer_text", None),
-            "parsed_payload": getattr(action, "parsed_payload", None),
-            "notice_rendered": bool(getattr(action, "notice_rendered", False)),
-            "notice_source": getattr(action, "notice_source", None),
-            "notice_text": getattr(action, "notice_text", None),
-            "fallback_guidance_used": bool(
-                getattr(action, "fallback_guidance_used", False)
-            ),
-            "h1_outcome": getattr(action, "h1_outcome", None),
-            "blocked_tool_name": getattr(action, "blocked_tool_name", None),
-            "blocked_mutation_repeat_count": getattr(
-                action,
-                "blocked_mutation_repeat_count",
-                0,
-            ),
-            "termination_reason": getattr(action, "termination_reason", None),
-            "final_verification_result": getattr(
-                action,
-                "final_verification_result",
-                state.final_verification_result,
-            ),
-        },
-    )
+    payload = {
+        "domain": "shopping",
+        "task_id": state.task_id,
+        "run_id": run_id,
+        "phase": phase,
+        "step_index": step_index,
+        "tool_index": tool_index,
+        "trigger_type": getattr(action, "trigger_type", None),
+        "trigger_reason": getattr(action, "trigger_reason", None),
+        "intervention_type": getattr(action, "intervention_type", None),
+        "overseer_invoked": bool(getattr(action, "overseer_invoked", False)),
+        "overseer_mode": getattr(action, "overseer_mode", "disabled"),
+        "executor_input_tokens": executor_input_tokens,
+        "executor_output_tokens": executor_output_tokens,
+        "overseer_input_tokens": getattr(action, "overseer_input_tokens", 0),
+        "overseer_output_tokens": getattr(action, "overseer_output_tokens", 0),
+        "executor_cost": executor_cost,
+        "overseer_cost": overseer_cost,
+        "total_cost": total_cost,
+        "failure_subtype": failure_subtype,
+        "loop_signature": getattr(action, "loop_signature", None),
+        "coverage_status": getattr(action, "coverage_status", None),
+        "raw_overseer_text": getattr(action, "raw_overseer_text", None),
+        "parsed_payload": getattr(action, "parsed_payload", None),
+        "notice_rendered": bool(getattr(action, "notice_rendered", False)),
+        "notice_source": getattr(action, "notice_source", None),
+        "notice_text": getattr(action, "notice_text", None),
+        "fallback_guidance_used": bool(
+            getattr(action, "fallback_guidance_used", False)
+        ),
+        "h1_outcome": getattr(action, "h1_outcome", None),
+        "blocked_tool_name": getattr(action, "blocked_tool_name", None),
+        "blocked_mutation_repeat_count": getattr(
+            action,
+            "blocked_mutation_repeat_count",
+            0,
+        ),
+        "termination_reason": getattr(action, "termination_reason", None),
+        "final_verification_result": getattr(
+            action,
+            "final_verification_result",
+            state.final_verification_result,
+        ),
+    }
+    if draft_final_answer is not None:
+        payload["draft_final_answer"] = draft_final_answer
+    await logger.log_event("oversight_step", payload)
 
 
 async def _maybe_log_overseer_error(
@@ -1038,6 +1039,9 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
                             executor_input_tokens=prompt_tokens,
                             executor_output_tokens=completion_tokens,
                             executor_cost=executor_cost,
+                            draft_final_answer=str(
+                                assistant_payload.get("content") or ""
+                            ),
                         )
                         await _maybe_log_overseer_error(
                             logger=logger,
