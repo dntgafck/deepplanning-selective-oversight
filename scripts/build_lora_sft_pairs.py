@@ -54,6 +54,7 @@ SPLIT_COUNTS = {
     "3": {"train": 10, "val": 2, "held_out": 8},
 }
 
+
 @dataclass(frozen=True, slots=True)
 class JoinKey:
     session_id: str
@@ -157,7 +158,9 @@ def _hook_from_trigger(trigger_type: str | None) -> str:
 
 
 def _hook_from_export(record: dict[str, Any]) -> str:
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    metadata = (
+        record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    )
     hook = str(metadata.get("hook") or "")
     if hook:
         return hook
@@ -282,14 +285,18 @@ def _task_query_for_level_task(level: str, task_id: str) -> str | None:
 def assert_split_disjoint_at_task_level(split: dict[str, Any]) -> None:
     counts = Counter(split_lookup(split).values())
     expected = {
-        split_name: sum(level_counts[split_name] for level_counts in SPLIT_COUNTS.values())
+        split_name: sum(
+            level_counts[split_name] for level_counts in SPLIT_COUNTS.values()
+        )
         for split_name in ("train", "val", "held_out")
     }
     if dict(counts) != expected:
         raise ValueError(f"Unexpected LoRA split counts: {dict(counts)} != {expected}")
 
 
-def load_export_records(paths: list[Path], *, progress: bool = False) -> list[dict[str, Any]]:
+def load_export_records(
+    paths: list[Path], *, progress: bool = False
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for path in tqdm(
         paths,
@@ -481,7 +488,11 @@ def load_local_records(
 
 def _message_from_output_payload(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
-        if "choices" in value and isinstance(value["choices"], list) and value["choices"]:
+        if (
+            "choices" in value
+            and isinstance(value["choices"], list)
+            and value["choices"]
+        ):
             choice = value["choices"][0]
             if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
                 return choice["message"]
@@ -523,7 +534,9 @@ def extract_target_text(export_record: dict[str, Any]) -> tuple[str | None, bool
     return None, False
 
 
-def _parse_target(target_text: str, hook: str) -> tuple[dict[str, Any] | None, str | None]:
+def _parse_target(
+    target_text: str, hook: str
+) -> tuple[dict[str, Any] | None, str | None]:
     try:
         if hook == "final":
             return parse_final_verifier_json(target_text), None
@@ -552,7 +565,10 @@ def _usage_value(usage: dict[str, Any], *keys: str) -> int | None:
 
 def _local_record_id(local: dict[str, Any]) -> tuple[str, Any]:
     event = local.get("event") if isinstance(local.get("event"), dict) else {}
-    return (str(local.get("source_event_path") or ""), event.get("_line_number") or id(local))
+    return (
+        str(local.get("source_event_path") or ""),
+        event.get("_line_number") or id(local),
+    )
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -565,7 +581,9 @@ def _parse_timestamp(value: Any) -> datetime | None:
         return None
 
 
-def _time_delta_seconds(export_record: dict[str, Any], local: dict[str, Any]) -> float | None:
+def _time_delta_seconds(
+    export_record: dict[str, Any], local: dict[str, Any]
+) -> float | None:
     export_time = _parse_timestamp(
         export_record.get("started_at")
         or export_record.get("startTime")
@@ -589,7 +607,9 @@ def _json_text_equivalent(left: str | None, right: str | None) -> bool:
         right_payload = json.loads(right)
     except json.JSONDecodeError:
         return False
-    return json.dumps(left_payload, sort_keys=True, separators=(",", ":")) == json.dumps(
+    return json.dumps(
+        left_payload, sort_keys=True, separators=(",", ":")
+    ) == json.dumps(
         right_payload,
         sort_keys=True,
         separators=(",", ":"),
@@ -678,8 +698,12 @@ def _select_local_candidate(
             score += 1000
             reasons.append("task_query_match")
 
-        event = candidate.get("event") if isinstance(candidate.get("event"), dict) else {}
-        if _json_text_equivalent(target_text, str(event.get("raw_overseer_text") or "")):
+        event = (
+            candidate.get("event") if isinstance(candidate.get("event"), dict) else {}
+        )
+        if _json_text_equivalent(
+            target_text, str(event.get("raw_overseer_text") or "")
+        ):
             score += 800
             reasons.append("target_text_match")
 
@@ -779,7 +803,9 @@ def _input_messages(export_record: dict[str, Any]) -> list[dict[str, Any]] | Non
 def _unmatched_langfuse_entry(
     key: JoinKey, export_record: dict[str, Any]
 ) -> dict[str, Any]:
-    return key.as_dict() | {"source_observation_id": export_record.get("observation_id")}
+    return key.as_dict() | {
+        "source_observation_id": export_record.get("observation_id")
+    }
 
 
 def _collision_entry(
@@ -892,7 +918,9 @@ def _pair_record(
         "overseer_mode": local["event"].get("overseer_mode")
         or (export_record.get("metadata") or {}).get("overseer_mode"),
         "input_messages": input_messages,
-        "input_messages_source": "langfuse" if input_messages is not None else "missing",
+        "input_messages_source": (
+            "langfuse" if input_messages is not None else "missing"
+        ),
         "target_text": target["text"],
         "target_text_source": target["source"],
         "parsed_payload": parsed_payload,
@@ -964,7 +992,9 @@ def _diagnostics(
             "matched": len(pairs),
             "unmatched_local": len(unmatched_local),
             "unmatched_langfuse": len(unmatched_langfuse),
-            "duplicate_langfuse": sum(item["record_count"] - 1 for item in duplicate_exports),
+            "duplicate_langfuse": sum(
+                item["record_count"] - 1 for item in duplicate_exports
+            ),
             "duplicate_langfuse_groups": len(duplicate_exports),
             "local_collision_candidates": len(local_collision_candidates),
             "ambiguous_order_matches": len(ambiguous_order_matches),
@@ -1107,7 +1137,9 @@ def _counts_by_source(
     )
     counts: dict[str, dict[str, int]] = {}
     for system in systems:
-        local_count = sum(1 for record in local_records if record["source_system"] == system)
+        local_count = sum(
+            1 for record in local_records if record["source_system"] == system
+        )
         export_count = sum(
             1 for record in export_records if record.get("source_system") == system
         )
@@ -1120,7 +1152,9 @@ def _counts_by_source(
             "input_messages_present": sum(
                 1 for pair in system_pairs if pair["input_messages"] is not None
             ),
-            "fallback_or_error": sum(1 for pair in system_pairs if not pair["parse_clean"]),
+            "fallback_or_error": sum(
+                1 for pair in system_pairs if not pair["parse_clean"]
+            ),
         }
     return counts
 
@@ -1180,7 +1214,9 @@ def write_outputs(
     clean_pairs = [
         pair
         for pair in pairs
-        if pair["parse_clean"] and pair["input_messages"] is not None and pair["split"] != "unknown"
+        if pair["parse_clean"]
+        and pair["input_messages"] is not None
+        and pair["split"] != "unknown"
     ]
     by_split = {
         "train": [pair for pair in clean_pairs if pair["split"] == "train"],

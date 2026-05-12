@@ -126,11 +126,15 @@ def test_pair_id_includes_session_id_to_avoid_multi_root_collisions():
         "trigger_type": "mutating_action",
     }
 
-    assert builder.make_pair_id(session_id="session-a", **common) != builder.make_pair_id(
+    assert builder.make_pair_id(
+        session_id="session-a", **common
+    ) != builder.make_pair_id(
         session_id="session-b",
         **common,
     )
-    assert builder.make_pair_id(session_id="session-a", **common) == builder.make_pair_id(
+    assert builder.make_pair_id(
+        session_id="session-a", **common
+    ) == builder.make_pair_id(
         session_id="session-a",
         **common,
     )

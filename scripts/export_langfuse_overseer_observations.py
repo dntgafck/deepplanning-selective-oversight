@@ -278,7 +278,9 @@ def extract_input_messages(observation: dict[str, Any]) -> list[dict[str, Any]] 
             return None
     if isinstance(candidate, dict) and isinstance(candidate.get("messages"), list):
         return [dict(item) for item in candidate["messages"] if isinstance(item, dict)]
-    if isinstance(candidate, list) and all(isinstance(item, dict) for item in candidate):
+    if isinstance(candidate, list) and all(
+        isinstance(item, dict) for item in candidate
+    ):
         return [dict(item) for item in candidate]
     if isinstance(candidate, dict) and isinstance(candidate.get("kwargs"), dict):
         messages = candidate["kwargs"].get("messages")
