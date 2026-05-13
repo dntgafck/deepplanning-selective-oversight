@@ -1,0 +1,6 @@
+outs:
+- md5: 4ea132b24a34f49d12e85d5665a2ddba.dir
+  size: 225103349
+  nfiles: 5
+  hash: md5
+  path: overseer-training-dataset-shopping

@@ -1,8 +1,9 @@
 """
 Analysis library for selective-oversight thesis experiments.
 
-Loads result archives + Langfuse cost CSV and produces per-system / per-level
-summary tables, per-case dataframes for head-to-heads, and cost rollups.
+Loads output session directories or legacy result archives plus Langfuse cost
+CSV, then produces per-system / per-level summary tables, per-case dataframes
+for head-to-heads, and cost rollups.
 
 Designed to be re-runnable from a notebook with minimal path edits.
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
@@ -21,7 +22,13 @@ import pandas as pd
 # Configuration
 # -----------------------------------------------------------------------------
 
-# Map from archive folder name -> canonical system label used everywhere.
+# Result directory discovery. Primary runs now use system-* names. The shopping-*
+# fallback keeps this notebook usable with the existing v1 output directories.
+DEFAULT_RESULT_PREFIXES = ("system-",)
+DEFAULT_FALLBACK_RESULT_PREFIXES = ("shopping-",)
+DEFAULT_IGNORE_PREFIXES = ("system-b", "shopping-b")
+
+# Map from legacy archive folder name -> canonical system label used everywhere.
 # The CSV labels shopping-d as "A" in its `system` column — we override that
 # here so D is always D.
 ARCHIVE_TO_SYSTEM = {
@@ -34,7 +41,18 @@ ARCHIVE_TO_SYSTEM = {
 }
 
 # Display order for tables / plots.
-SYSTEM_ORDER = ["A", "C2", "C2-nt", "C2-noretry", "C2-deepseek", "D"]
+SYSTEM_ORDER = [
+    "A",
+    "B",
+    "C1",
+    "C2",
+    "C2-nt",
+    "C2-noretry",
+    "C2-deepseek",
+    "C2-deepseek-nt",
+    "C2-deepseek-pro",
+    "D",
+]
 
 # Per-system metadata: executor / overseer / how to read it.
 SYSTEM_META = {
@@ -80,6 +98,165 @@ PRICE_QWEN_OUTPUT = 0.15  # USD / 1M tokens
 # -----------------------------------------------------------------------------
 
 
+def _read_json(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return payload
+
+
+def _nested(mapping: dict[str, Any], *keys: str) -> Any:
+    value: Any = mapping
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _metadata_experiment_name(metadata: dict[str, Any], session_root: Path) -> str:
+    return str(
+        _nested(metadata, "experiment", "name")
+        or _nested(metadata, "parameters", "name")
+        or session_root.parent.name
+    )
+
+
+def _metadata_system_name(metadata: dict[str, Any]) -> str:
+    return str(_nested(metadata, "parameters", "system", "name") or "")
+
+
+def _metadata_model_name(metadata: dict[str, Any], key: str) -> str:
+    return str(_nested(metadata, "parameters", "models", key) or "")
+
+
+def _normalize_slug(value: str) -> str:
+    return value.strip().lower().replace("_", "-")
+
+
+def _optional_str(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value)
+
+
+def _has_prefix(value: str, prefixes: Iterable[str]) -> bool:
+    normalized = _normalize_slug(value)
+    return any(normalized.startswith(_normalize_slug(prefix)) for prefix in prefixes)
+
+
+def normalize_system_label(experiment_name: str, metadata_system: str = "") -> str:
+    """Derive a stable display label from an experiment directory/name.
+
+    Examples:
+      shopping-a -> A
+      system-c2-noretry -> C2-noretry
+      shopping-c2-deepseek-pro -> C2-deepseek-pro
+    """
+    slug = _normalize_slug(experiment_name)
+    for prefix in ("shopping-", "system-"):
+        if slug.startswith(prefix):
+            slug = slug[len(prefix) :]
+            break
+
+    parts = [part for part in slug.split("-") if part]
+    if parts:
+        head = parts[0]
+        if head in {"a", "b", "c1", "c2", "d"}:
+            label = head.upper()
+            tail = "-".join(parts[1:])
+            return f"{label}-{tail}" if tail else label
+
+    if metadata_system:
+        return metadata_system.upper()
+    return experiment_name
+
+
+def ordered_systems(systems: Iterable[str]) -> list[str]:
+    """Return known systems in thesis order, followed by new variants by name."""
+    present = {str(system) for system in systems if pd.notna(system)}
+    ordered = [system for system in SYSTEM_ORDER if system in present]
+    ordered.extend(sorted(present.difference(ordered)))
+    return ordered
+
+
+def set_system_order(systems: Iterable[str]) -> list[str]:
+    """Update global plot/table order from the systems loaded in this notebook."""
+    global SYSTEM_ORDER
+    SYSTEM_ORDER = ordered_systems(systems)
+    return SYSTEM_ORDER
+
+
+def discover_output_sessions(
+    experiments_root: Path,
+    *,
+    include_prefixes: Iterable[str] = DEFAULT_RESULT_PREFIXES,
+    fallback_include_prefixes: Iterable[str] = DEFAULT_FALLBACK_RESULT_PREFIXES,
+    ignore_prefixes: Iterable[str] = DEFAULT_IGNORE_PREFIXES,
+    include_system_b: bool = False,
+) -> list[Path]:
+    """Discover timestamped experiment sessions under outputs.
+
+    The primary prefix list is tried first. If it finds no sessions, the fallback
+    prefix list is tried so older shopping-* output directories still work.
+    """
+
+    def discover_with_prefixes(prefixes: Iterable[str]) -> list[Path]:
+        session_roots: list[Path] = []
+        for metadata_path in sorted(experiments_root.rglob("experiment_session.json")):
+            session_root = metadata_path.parent
+            metadata = _read_json(metadata_path)
+            experiment_name = _metadata_experiment_name(metadata, session_root)
+            directory_name = session_root.parent.name
+            system_name = _metadata_system_name(metadata)
+            system_label = normalize_system_label(experiment_name, system_name)
+
+            if prefixes and not (
+                _has_prefix(experiment_name, prefixes)
+                or _has_prefix(directory_name, prefixes)
+            ):
+                continue
+            if ignore_prefixes and (
+                _has_prefix(experiment_name, ignore_prefixes)
+                or _has_prefix(directory_name, ignore_prefixes)
+            ):
+                continue
+            if not include_system_b and (
+                system_name.upper() == "B" or system_label.upper() == "B"
+            ):
+                continue
+            if not list(
+                (session_root / "aggregated_results").glob("*_aggregated.json")
+            ):
+                continue
+            session_roots.append(session_root)
+        return session_roots
+
+    sessions = discover_with_prefixes(tuple(include_prefixes))
+    if sessions or not fallback_include_prefixes:
+        return sessions
+    return discover_with_prefixes(tuple(fallback_include_prefixes))
+
+
+def describe_sessions(session_roots: Iterable[Path]) -> pd.DataFrame:
+    """Return a small table describing discovered sessions."""
+    rows = []
+    for session_root in session_roots:
+        metadata = _read_json(session_root / "experiment_session.json")
+        experiment_name = _metadata_experiment_name(metadata, session_root)
+        system_name = _metadata_system_name(metadata)
+        rows.append(
+            {
+                "experiment_name": experiment_name,
+                "system": normalize_system_label(experiment_name, system_name),
+                "metadata_system": system_name,
+                "timestamp": session_root.name,
+                "session_root": str(session_root),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _level_from_dirname(dirname: str) -> int:
     """Extract level number from folder name like database_qwen3.5-9b_level1_..."""
     m = re.search(r"level(\d+)", dirname)
@@ -95,13 +272,70 @@ def _find_session_root(archive_dir: Path) -> Path:
     return timestamp_dir
 
 
-def load_per_case(archives_root: Path) -> pd.DataFrame:
-    """Load every (system, run, level, case) row from result_report folders.
+def _session_context(session_root: Path) -> dict[str, str]:
+    metadata = _read_json(session_root / "experiment_session.json")
+    experiment_name = _metadata_experiment_name(metadata, session_root)
+    system_name = _metadata_system_name(metadata)
+    return {
+        "experiment_name": experiment_name,
+        "system": normalize_system_label(experiment_name, system_name),
+        "executor_model": _metadata_model_name(metadata, "executor"),
+        "overseer_model": _metadata_model_name(metadata, "overseer"),
+        "timestamp": session_root.name,
+    }
 
-    Returns columns:
-      system, run, level, case_name, case_score, score, success,
-      matched_count, expected_count, extra_products_count, is_completed
-    """
+
+def _run_id_from_run_dir(run_dir: Path) -> int:
+    return int(run_dir.name.split("_")[1])
+
+
+def _load_per_case_from_sessions(session_roots: Iterable[Path]) -> pd.DataFrame:
+    rows = []
+    next_run_by_system: dict[str, int] = {}
+
+    for session_root in sorted(Path(root) for root in session_roots):
+        context = _session_context(session_root)
+        system = context["system"]
+        run_map: dict[int, int] = {}
+        for run_dir in sorted(session_root.glob("shopping/*/run_*")):
+            original_run_id = _run_id_from_run_dir(run_dir)
+            if original_run_id not in run_map:
+                run_map[original_run_id] = next_run_by_system.get(system, 0)
+                next_run_by_system[system] = run_map[original_run_id] + 1
+            run_id = run_map[original_run_id]
+            rr = run_dir / "result_report"
+            if not rr.exists():
+                continue
+            for level_dir in sorted(rr.iterdir()):
+                if not level_dir.is_dir():
+                    continue
+                level = _level_from_dirname(level_dir.name)
+                summary = level_dir / "summary_report.json"
+                if not summary.exists():
+                    print(f"[warn] missing summary: {summary}")
+                    continue
+                data = _read_json(summary)
+                for c in data.get("case_results", []):
+                    rows.append(
+                        {
+                            **context,
+                            "run": run_id,
+                            "original_run": original_run_id,
+                            "level": level,
+                            "case_name": c["case_name"],
+                            "case_score": c.get("case_score", 0.0),
+                            "score": c.get("score", 0.0),
+                            "success": bool(c.get("success", False)),
+                            "matched_count": c.get("matched_count", 0),
+                            "expected_count": c.get("expected_count", 0),
+                            "extra_products_count": c.get("extra_products_count", 0),
+                            "is_completed": bool(c.get("is_completed", False)),
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def _load_per_case_from_archives(archives_root: Path) -> pd.DataFrame:
     rows = []
     for archive_name, system in ARCHIVE_TO_SYSTEM.items():
         archive_dir = archives_root / archive_name
@@ -139,12 +373,61 @@ def load_per_case(archives_root: Path) -> pd.DataFrame:
                             "is_completed": bool(c.get("is_completed", False)),
                         }
                     )
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 
-def load_aggregated(archives_root: Path) -> pd.DataFrame:
-    """Load aggregated_results/*_run_N_aggregated.json — one row per (system, run)."""
+def load_per_case(source: Path | Iterable[Path]) -> pd.DataFrame:
+    """Load every (system, run, level, case) row from result_report folders.
+
+    Returns columns:
+      system, run, level, case_name, case_score, score, success,
+      matched_count, expected_count, extra_products_count, is_completed
+    """
+    if isinstance(source, Path):
+        if (source / "experiment_session.json").exists():
+            return _load_per_case_from_sessions([source])
+        return _load_per_case_from_archives(source)
+    return _load_per_case_from_sessions(source)
+
+
+def _load_aggregated_from_sessions(session_roots: Iterable[Path]) -> pd.DataFrame:
+    rows = []
+    next_run_by_system: dict[str, int] = {}
+
+    for session_root in sorted(Path(root) for root in session_roots):
+        context = _session_context(session_root)
+        system = context["system"]
+        run_map: dict[int, int] = {}
+        for agg in sorted(
+            (session_root / "aggregated_results").glob("*_aggregated.json")
+        ):
+            data = _read_json(agg)
+            original_run_id = int(data["run_id"])
+            if original_run_id not in run_map:
+                run_map[original_run_id] = next_run_by_system.get(system, 0)
+                next_run_by_system[system] = run_map[original_run_id] + 1
+            shop = (data.get("domains") or {}).get("shopping")
+            if not shop:
+                continue
+            rows.append(
+                {
+                    **context,
+                    "run": run_map[original_run_id],
+                    "original_run": original_run_id,
+                    "model_name": data["model_name"],
+                    "total_cases": shop["total_cases"],
+                    "successful_cases": shop["successful_cases"],
+                    "successful_rate": shop["successful_rate"],
+                    "match_rate": shop["match_rate"],
+                    "weighted_avg_case_score": shop["weighted_average_case_score"],
+                    "incomplete_cases": shop["incomplete_cases"],
+                    "incomplete_rate": shop["incomplete_rate"],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _load_aggregated_from_archives(archives_root: Path) -> pd.DataFrame:
     rows = []
     for archive_name, system in ARCHIVE_TO_SYSTEM.items():
         archive_dir = archives_root / archive_name
@@ -174,6 +457,15 @@ def load_aggregated(archives_root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def load_aggregated(source: Path | Iterable[Path]) -> pd.DataFrame:
+    """Load aggregated_results/*_run_N_aggregated.json — one row per (system, run)."""
+    if isinstance(source, Path):
+        if (source / "experiment_session.json").exists():
+            return _load_aggregated_from_sessions([source])
+        return _load_aggregated_from_archives(source)
+    return _load_aggregated_from_sessions(source)
+
+
 # -----------------------------------------------------------------------------
 # Langfuse cost loading
 # -----------------------------------------------------------------------------
@@ -187,54 +479,49 @@ def load_langfuse(csv_path: Path) -> pd.DataFrame:
       runs, per_run_total, cache_hit_rate
     """
     raw = pd.read_csv(csv_path)
-    # The CSV mislabels shopping-d as system="A" — fix from experiment_name.
-    name_to_system = {
-        v_name: v_sys
-        for v_name, v_sys in zip(
-            [
-                "shopping-a",
-                "shopping-c2",
-                "shopping-c2-deepseek",
-                "shopping-c2-noretry",
-                "shopping-c2-nt",
-                "shopping-d",
-            ],
-            ["A", "C2", "C2-deepseek", "C2-noretry", "C2-nt", "D"],
-        )
-    }
-    raw["system"] = raw["experiment_name"].map(name_to_system).fillna(raw["system"])
 
     rows = []
     for _, r in raw.iterrows():
-        system = r["system"]
+        experiment_name = _optional_str(r["experiment_name"])
+        system = normalize_system_label(experiment_name, _optional_str(r.get("system")))
         runs = int(r["run_count"])
         usage = json.loads(r["langfuse_usage_by_model_json"])
-        executor_model = SYSTEM_META[system]["executor"]
-        overseer_model = SYSTEM_META[system]["overseer"]
+        meta = SYSTEM_META.get(system, {})
+        executor_model = _optional_str(r.get("executor_model")) or _optional_str(
+            meta.get("executor")
+        )
+        overseer_model = _optional_str(r.get("overseer_model")) or _optional_str(
+            meta.get("overseer")
+        )
+        session_key = _optional_str(
+            r.get("langfuse_session_id") or f"{experiment_name}-{r.name}"
+        )
 
         for u in usage:
             model = u["model"].lower()
             # Edge case: when executor and overseer use the same model, Langfuse's
             # usage_by_model rolls them up into a single row that we cannot split.
             # Tag this as 'combined' so the breakdown plot can color it distinctly.
+            executor_l = executor_model.lower()
+            overseer_l = overseer_model.lower()
             if (
-                executor_model
-                and executor_model.lower() in model
-                and overseer_model
-                and overseer_model.lower() in model
-                and executor_model == overseer_model
+                executor_l
+                and overseer_l
+                and executor_l == overseer_l
+                and executor_l in model
             ):
                 role = "combined"
-            elif executor_model and executor_model.lower() in model:
+            elif executor_l and executor_l in model:
                 role = "executor"
-            elif overseer_model and overseer_model.lower() in model:
+            elif overseer_l and overseer_l in model:
                 role = "overseer"
             else:
                 role = "other"
 
             rows.append(
                 {
-                    "experiment_name": r["experiment_name"],
+                    "experiment_name": experiment_name,
+                    "session_key": session_key,
                     "system": system,
                     "runs": runs,
                     "role": role,
@@ -246,6 +533,31 @@ def load_langfuse(csv_path: Path) -> pd.DataFrame:
                 }
             )
     df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    runs_by_system = (
+        df[["system", "session_key", "runs"]]
+        .drop_duplicates()
+        .groupby("system")["runs"]
+        .sum()
+    )
+    df = (
+        df.groupby(["system", "role", "model"], as_index=False)
+        .agg(
+            experiment_name=(
+                "experiment_name",
+                lambda values: ",".join(sorted(set(values))),
+            ),
+            session_key=("session_key", lambda values: ",".join(sorted(set(values)))),
+            input_uncached=("input_uncached", "sum"),
+            input_cached=("input_cached", "sum"),
+            output=("output", "sum"),
+            total=("total", "sum"),
+        )
+        .reset_index(drop=True)
+    )
+    df["runs"] = df["system"].map(runs_by_system).astype(int)
     df["input_total"] = df["input_uncached"] + df["input_cached"]
     df["per_run_input_uncached"] = df["input_uncached"] / df["runs"]
     df["per_run_input_cached"] = df["input_cached"] / df["runs"]
@@ -278,7 +590,9 @@ def system_token_summary(lf: pd.DataFrame) -> pd.DataFrame:
         g["input_cached"] / g["input_total"],
         np.nan,
     )
-    g["system"] = pd.Categorical(g["system"], categories=SYSTEM_ORDER, ordered=True)
+    g["system"] = pd.Categorical(
+        g["system"], categories=ordered_systems(g["system"]), ordered=True
+    )
     return g.sort_values("system").reset_index(drop=True)
 
 
@@ -326,7 +640,9 @@ def cost_dollars(lf: pd.DataFrame) -> pd.DataFrame:
             }
         )
     out = pd.DataFrame(rows)
-    out["system"] = pd.Categorical(out["system"], categories=SYSTEM_ORDER, ordered=True)
+    out["system"] = pd.Categorical(
+        out["system"], categories=ordered_systems(out["system"]), ordered=True
+    )
     return out.sort_values("system").reset_index(drop=True)
 
 
@@ -391,7 +707,9 @@ def system_summary(per_case: pd.DataFrame) -> pd.DataFrame:
     out = overall_summary.merge(
         level_wide_mean, left_on="system", right_index=True
     ).merge(level_wide_std, left_on="system", right_index=True)
-    out["system"] = pd.Categorical(out["system"], categories=SYSTEM_ORDER, ordered=True)
+    out["system"] = pd.Categorical(
+        out["system"], categories=ordered_systems(out["system"]), ordered=True
+    )
     return out.sort_values("system").reset_index(drop=True)
 
 

@@ -574,7 +574,7 @@ def test_provider_config_from_model_name_loads_cached_pricing_for_deepseek():
     assert provider.extra_body == {"thinking": {"type": "enabled"}}
     assert provider.pricing.calculator == "cached_input_output_v1"
     assert provider.pricing.prices == {
-        "input_cache_hit_per_million_usd": 0.028,
+        "input_cache_hit_per_million_usd": 0.0028,
         "input_cache_miss_per_million_usd": 0.14,
         "output_per_million_usd": 0.28,
     }

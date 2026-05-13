@@ -36,7 +36,7 @@ models:
     pricing:
       calculator: cached_input_output_v1
       prices:
-        input_cache_hit_per_million_usd: 0.028
+        input_cache_hit_per_million_usd: 0.0028
         input_cache_miss_per_million_usd: 0.14
         output_per_million_usd: 0.28
 
@@ -58,7 +58,7 @@ models:
     pricing:
       calculator: cached_input_output_v1
       prices:
-        input_cache_hit_per_million_usd: 0.028
+        input_cache_hit_per_million_usd: 0.0028
         input_cache_miss_per_million_usd: 0.14
         output_per_million_usd: 0.28
 
@@ -78,3 +78,25 @@ models:
         input_cache_hit_per_million_usd: 0.0028
         input_cache_miss_per_million_usd: 0.14
         output_per_million_usd: 0.28
+
+  deepseek-v4-pro:
+    model_name: deepseek-v4-pro
+    model_type: openai
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    seed: 42
+    request_params:
+      reasoning_effort: high
+    extra_body:
+      thinking:
+        type: enabled
+    max_retries: 30
+    backoff: 1.5
+    pricing:
+      calculator: cached_input_output_v1
+      prices:
+        input_cache_hit_per_million_usd: 0.003625
+        input_cache_miss_per_million_usd: 0.435
+        output_per_million_usd: 0.87
