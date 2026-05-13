@@ -72,7 +72,7 @@ index-strategy = "unsafe-best-match"
 torch = "==2.11.0"
 torchvision = "*"
 torchaudio = "*"
-vllm = "==0.20.2"
+# vllm = "==0.20.2"
 
 
 [feature.gpu.dependencies]
