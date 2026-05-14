@@ -94,18 +94,19 @@ PROFILES = {
 # and are ignored at training time.
 # ============================================================================
 
-def load_jsonl(path: Path, subsample: Optional[int], seed: int) -> Dataset:
+def load_jsonl(path: Path, subsample: Optional[int], seed: int, max_seq_len: Optional[int] = None) -> Dataset:
     with path.open() as f:
         records = [json.loads(line) for line in f]
+    if max_seq_len is not None:
+        before = len(records)
+        records = [r for r in records if r.get("tokenized_len", 0) <= max_seq_len]
+        print(f"[data]   length-filter: {before} -> {len(records)} (cap {max_seq_len})")
     if subsample is not None and subsample < len(records):
         rng = random.Random(seed)
         rng.shuffle(records)
         records = records[:subsample]
-    # SFTTrainer accepts datasets with a "messages" column directly.
-    # Strip metadata to make the dataset smaller in memory.
     dataset_records = [{"messages": r["messages"]} for r in records]
     return Dataset.from_list(dataset_records)
-
 
 # ============================================================================
 # Main.
@@ -115,8 +116,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["pilot", "headline"], required=True)
     parser.add_argument("--base_model", default="Qwen/Qwen2.5-7B-Instruct")
-    parser.add_argument("--train_path", default="out/train_swift.jsonl")
-    parser.add_argument("--val_path", default="out/val_swift.jsonl")
+    parser.add_argument("--train_path", default="outputs/deepplanning/overseer_sft_dataset/train_swift.jsonl")
+    parser.add_argument("--val_path", default="outputs/deepplanning/overseer_sft_dataset/val_swift.jsonl")
     parser.add_argument("--output_dir", default=None,
                         help="Default: out/pilot_lora or out/headline_lora based on --mode")
     parser.add_argument("--max_seq_length", type=int, default=12288)
@@ -138,7 +139,7 @@ def main():
 
     profile = PROFILES[args.mode]
     if args.output_dir is None:
-        args.output_dir = f"out/{profile.name}_lora"
+        args.output_dir = f"ououtputs/deepplanning/overseer_sft_dataset/{profile.name}_lora"
 
     # ------------------------------------------------------------------------
     # Auto-detect attention implementation.
@@ -175,11 +176,11 @@ def main():
             print(f"[data] separated pad_token from eos_token: pad={tokenizer.pad_token!r}")
 
     print(f"[data] loading train from {args.train_path}")
-    train_ds = load_jsonl(Path(args.train_path), profile.train_subsample, args.seed)
+    train_ds = load_jsonl(Path(args.train_path), profile.train_subsample, args.seed, args.max_seq_length)
     print(f"[data]   train size after subsample: {len(train_ds)}")
 
     print(f"[data] loading val from {args.val_path}")
-    val_ds = load_jsonl(Path(args.val_path), profile.eval_subsample, args.seed)
+    val_ds = load_jsonl(Path(args.val_path), profile.eval_subsample, args.seed, args.max_seq_length)
     print(f"[data]   val size after subsample: {len(val_ds)}")
 
     # ------------------------------------------------------------------------
@@ -238,8 +239,8 @@ def main():
         assistant_only_loss=True,
         # Packing off — keeps each pair isolated, no cross-contamination.
         packing=False,
-        # Bucketing by length for the long-tail efficiency win.
-        group_by_length=True,
+        # NOTE: group_by_length was removed/moved in newer TRL versions.
+        # We accept the small throughput hit from padding to in-batch max length.
         # Be explicit so we never accidentally enable any of these.
         remove_unused_columns=False,
     )
