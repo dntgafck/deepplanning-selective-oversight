@@ -10,6 +10,8 @@ lint-all = "pre-commit run --all-files"
 test = "pytest"
 deepplanning-experiment = "python scripts/run_experiment.py"
 model-chat = "python scripts/run_model_completion.py"
+langfuse-session-usage = "python scripts/fetch_langfuse_session_usage.py"
+langfuse-results-usage = "python scripts/export_langfuse_results_usage.py"
 
 [dependencies]
 # Core runtime
@@ -19,7 +21,7 @@ pip = "*"
 importlib-metadata = "<8.7.0"
 
 # Numerical / plotting
-numpy = ">=2,<2.4"
+numpy = ">=1.26,<3"
 scipy = ">=1.13,<2"
 matplotlib = ">=3.9,<4"
 scikit-learn = ">=1.5,<2"
@@ -31,11 +33,8 @@ jupyterlab = ">=4.5.6,<5"
 # Core libraries
 httpx = ">=0.27,<1"
 tenacity = ">=8.3,<10"
-# Loosened from >=1.3 so the `train` env can resolve to 0.x (ms-swift <4.1 caps it).
-# default/prep envs still resolve to 1.x since nothing constrains them down.
-huggingface-hub = ">=0.30,<2"
-transformers = "*"
-openai = ">=2.0.0,<3"
+huggingface-hub = ">=0.30,<1"
+openai = ">2"
 rank-bm25 = ">=0.2.2,<0.3"
 
 # CLI / config / workflow
@@ -47,67 +46,3 @@ langfuse = ">=4.0.6, <5"
 seaborn = ">=0.13.2, <0.14"
 fire = ">=0.7.1, <0.8"
 ipywidgets = ">=8.1.8, <9"
-wandb = ">=0.26.1, <0.27"
-
-# ---- Prep feature (cross-platform; works on Mac for local data-prep) ------
-
-[feature.prep.pypi-dependencies]
-sentencepiece = ">=0.2.1, <0.3"
-tiktoken = ">=0.12.0, <0.13"
-
-# ---- Train feature (linux-64 only) ----------------------------------------
-
-[feature.train]
-platforms = ["linux-64"]
-
-[feature.train.pypi-dependencies]
-peft = "*"
-accelerate = "*"
-datasets = "*"
-bitsandbytes = "*"
-einops = ">=0.8.2, <0.9"
-hf-transfer = ">=0.1.9, <0.2"
-
-# Qwen3.5 architectural kernels.
-flash-linear-attention = ">=0.5.0, <0.6"
-causal-conv1d = ">=1.6.2.post1, <2"
-
-# Training framework.
-# Pin reasoning (narrowed from previous `>=3.5,<4.1`):
-#   - <3.12.3 dodges the broken gradio dep (3.12.3-4.0.4 internally
-#     conflict on pillow==12.2.0 + gradio<6).
-#   - >=3.8 is where the pillow==12.2.0 pin landed; matches conda's pillow.
-#   - 4.1+ is also broken (same gradio/pillow conflict).
-ms-swift = ">=3.8,<3.12.3"
-
-# ms-swift transitive deps that don't auto-resolve via package extras.
-modelscope = "*"
-addict = "*"
-simplejson = "*"
-oss2 = "*"
-
-# ---- GPU feature (linux-64 only, with PyTorch cu130 wheels) ---------------
-
-[feature.gpu]
-platforms = ["linux-64"]
-
-[feature.gpu.pypi-options]
-extra-index-urls = ["https://download.pytorch.org/whl/cu130"]
-index-strategy = "unsafe-best-match"
-
-[feature.gpu.pypi-dependencies]
-torch = "==2.11.0"
-torchvision = "*"
-torchaudio = "*"
-# vllm intentionally excluded; add it under a separate `serve` env later.
-
-[feature.gpu.dependencies]
-setuptools = "<82"
-lark = "==1.2.2"
-
-# ---- Environments ---------------------------------------------------------
-
-[environments]
-default = { solve-group = "default" }
-prep = { features = ["prep"], solve-group = "default" }
-train = { features = ["prep", "train", "gpu"] }
