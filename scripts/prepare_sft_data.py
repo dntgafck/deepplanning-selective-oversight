@@ -9,27 +9,13 @@ from typing import Any
 import fire
 
 
-DEFAULT_MAX_SEQ_LEN = 12288
-DEFAULT_BASE_MODEL = "Qwen/Qwen3.5-9B"
+DEFAULT_MAX_SEQ_LEN = 16384
+DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
 
 def _load_tokenizer(base_model: str) -> Any:
     from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
-    try:
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": "ping"}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    except TypeError as exc:
-        raise RuntimeError(
-            "Tokenizer chat template does not accept enable_thinking. "
-            "Use transformers >= 5.2 for Qwen3.5 data preparation."
-        ) from exc
-    return tokenizer
+    return AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
 
 
 def _build_messages(record: dict[str, Any]) -> list[dict[str, Any]]:

@@ -1,0 +1,6 @@
+outs:
+- md5: 31f36b80fde23a27652fba1a1cb81f89.dir
+  size: 245183207
+  nfiles: 4
+  hash: md5
+  path: overseer_sft_dataset

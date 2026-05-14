@@ -1,6 +1,7 @@
 [core]
     remote = r2-public
     autostage = true
+    hardlink_lock = true
 [cache]
     type = "reflink,hardlink"
 ['remote "r2"']

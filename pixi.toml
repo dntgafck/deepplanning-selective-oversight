@@ -10,8 +10,6 @@ lint-all = "pre-commit run --all-files"
 test = "pytest"
 deepplanning-experiment = "python scripts/run_experiment.py"
 model-chat = "python scripts/run_model_completion.py"
-langfuse-session-usage = "python scripts/fetch_langfuse_session_usage.py"
-langfuse-results-usage = "python scripts/export_langfuse_results_usage.py"
 
 [dependencies]
 # Core runtime
@@ -33,7 +31,7 @@ jupyterlab = ">=4.5.6,<5"
 # Core libraries
 httpx = ">=0.27,<1"
 tenacity = ">=8.3,<10"
-huggingface-hub = ">=0.30,<1"
+huggingface-hub = ">1"
 openai = ">2"
 rank-bm25 = ">=0.2.2,<0.3"
 
@@ -46,3 +44,4 @@ langfuse = ">=4.0.6, <5"
 seaborn = ">=0.13.2, <0.14"
 fire = ">=0.7.1, <0.8"
 ipywidgets = ">=8.1.8, <9"
+transformers = ">=5.8.1, <6"
