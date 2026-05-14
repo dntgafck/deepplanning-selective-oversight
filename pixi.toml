@@ -47,19 +47,45 @@ fire = ">=0.7.1, <0.8"
 ipywidgets = ">=8.1.8, <9"
 wandb = ">=0.26.1, <0.27"
 
+# ---- Prep feature (cross-platform; works on Mac for local data-prep) ------
+
 [feature.prep.pypi-dependencies]
 sentencepiece = ">=0.2.1, <0.3"
 tiktoken = ">=0.12.0, <0.13"
 
-[feature.train.target.linux-64.pypi-dependencies]
+# ---- Train feature (linux-64 only) ----------------------------------------
+# Restricting at the feature level (not per-dep) is what keeps Mac from
+# trying to resolve ms-swift at all. With `platforms = ["linux-64"]` here
+# AND on `gpu`, the `train` environment is automatically linux-only.
+
+[feature.train]
+platforms = ["linux-64"]
+
+[feature.train.pypi-dependencies]
 peft = "*"
 accelerate = "*"
 datasets = "*"
 bitsandbytes = "*"
-flash-linear-attention = ">=0.5.0, <0.6"
-causal-conv1d = ">=1.6.2.post1, <2"
 einops = ">=0.8.2, <0.9"
 hf-transfer = ">=0.1.9, <0.2"
+
+# Qwen3.5 architectural kernels.
+flash-linear-attention = ">=0.5.0, <0.6"
+causal-conv1d = ">=1.6.2.post1, <2"
+
+# Training framework.
+# Pin reasoning: ms-swift 4.1+ has an internal dep conflict
+# (pillow==12.2.0 + gradio<6 has no satisfying gradio version), so we cap
+# at <4.1. Floor of 3.5 is where Qwen3.5 support landed in ms-swift.
+ms-swift = ">=3.5,<4.1"
+
+# ms-swift transitive deps that don't auto-resolve via package extras.
+modelscope = "*"
+addict = "*"
+simplejson = "*"
+oss2 = "*"
+
+# ---- GPU feature (linux-64 only, with PyTorch cu130 wheels) ---------------
 
 [feature.gpu]
 platforms = ["linux-64"]
@@ -72,14 +98,15 @@ index-strategy = "unsafe-best-match"
 torch = "==2.11.0"
 torchvision = "*"
 torchaudio = "*"
-# vllm = "==0.20.2"
-
+# vllm intentionally excluded; train env doesn't need it.
+# Add it under a separate `serve` env when adapter is ready to deploy.
 
 [feature.gpu.dependencies]
+# Conda-side overrides for the train env only.
 setuptools = "<82"
 lark = "==1.2.2"
 
-[feature.gpu.target.linux-64.dependencies]
+# ---- Environments ---------------------------------------------------------
 
 [environments]
 default = { solve-group = "default" }
