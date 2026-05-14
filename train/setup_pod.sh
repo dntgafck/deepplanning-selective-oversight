@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 # Fresh-pod setup for Qwen2.5-7B-Instruct LoRA training.
 #
-# Designed for the runpod/pytorch container image (preinstalled torch + CUDA).
-# Tested with:  runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
-# Any image with torch >= 2.4 and CUDA visible to torch should also work.
+# Designed for the runpod/pytorch container image. Tested with:
+#   runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
 #
-# How it handles PEP 668 (Ubuntu 24.04+):
-#   Ubuntu's system Python is "externally managed" so uv/pip refuse to install
-#   into it. Solution: create a venv with --system-site-packages so we INHERIT
-#   the preinstalled torch from the container without reinstalling it, then
-#   install our training stack into the venv (where pip is allowed to write).
+# Design choices, written down so future-me doesn't undo them:
 #
-# What this does:
-#   1. Verify the preinstalled torch+CUDA stack (using the container's Python)
-#   2. Install uv if missing
-#   3. Create a venv that inherits torch from the container
-#   4. uv-install the training stack into the venv
-#   5. Try flash-attn (non-fatal)
-#   6. Configure HF and W&B
+# - Ubuntu 24.04's system Python is PEP-668 "externally managed" — uv pip
+#   --system fails without --break-system-packages. We use a venv instead.
 #
-# Speed: ~1-3 minutes total.
+# - The venv does NOT inherit site-packages (`--system-site-packages` was
+#   tried; uv's resolver still installed a fresh torch from PyPI's default
+#   index, which is currently a cu130 build. That cu130 torch then
+#   shadowed the container's cu128 torch, causing flash-attn build failures
+#   when it found cu128 nvcc but cu130 torch headers.)
+#
+# - Instead, we install torch==2.8.0 explicitly from the cu128 wheel index
+#   as the FIRST step. This reinstalls torch into the venv (~1-2 min,
+#   ~3 GB) but the result is fully deterministic. Subsequent installs see
+#   torch already at 2.8.0+cu128 in the venv and won't try to upgrade it.
+#
+# Speed: ~3-5 min on a typical pod.
 
 set -euo pipefail
 
@@ -28,35 +29,27 @@ set -euo pipefail
 # ============================================================================
 VENV_DIR=${VENV_DIR:-.venv}
 
+# These pins MUST match the container's torch build. For the
+# runpod/pytorch:cu1281-torch280-ubuntu2404 image: torch 2.8.0 + cu128.
+# If you switch to a different container template, update these and re-run.
+TORCH_VERSION=2.8.0
+TORCH_INDEX=https://download.pytorch.org/whl/cu128
+
 # ============================================================================
-# 1. Verify the preinstalled torch+CUDA stack (against container Python).
+# 1. Verify the host has CUDA visible and find the container's Python.
 # ============================================================================
-# Find the container's Python. On runpod/pytorch images this is typically
-# /usr/bin/python3 with torch installed system-wide.
 CONTAINER_PYTHON=${CONTAINER_PYTHON:-$(which python3)}
 echo "==> Container python: ${CONTAINER_PYTHON}"
+"${CONTAINER_PYTHON}" --version
 
-"${CONTAINER_PYTHON}" - <<'PY'
-import sys
+# Show what torch the container has, for diagnostic purposes only.
+# (We'll install our own copy in the venv regardless.)
+"${CONTAINER_PYTHON}" - <<'PY' || true
 try:
     import torch
+    print(f"[diagnostic] container torch: {torch.__version__}, cuda: {torch.version.cuda}")
 except ImportError:
-    print("FATAL: torch is not installed in this image's system Python.")
-    print("       Use a runpod/pytorch image with torch preinstalled.")
-    sys.exit(1)
-
-print(f"python: {sys.version.split()[0]}")
-print(f"torch:  {torch.__version__}")
-print(f"cuda available: {torch.cuda.is_available()}")
-assert torch.cuda.is_available(), "FATAL: torch can't see CUDA"
-print(f"cuda (torch): {torch.version.cuda}")
-print(f"gpu: {torch.cuda.get_device_name(0)}")
-print(f"bf16 supported: {torch.cuda.is_bf16_supported()}")
-
-major, minor = map(int, torch.__version__.split("+")[0].split(".")[:2])
-if (major, minor) < (2, 4):
-    print(f"FATAL: torch {torch.__version__} is too old. Need >= 2.4 for TRL+PEFT.")
-    sys.exit(1)
+    print("[diagnostic] no torch in container Python (will install fresh)")
 PY
 
 # ============================================================================
@@ -70,36 +63,48 @@ fi
 echo "==> uv version: $(uv --version)"
 
 # ============================================================================
-# 3. Create a venv that inherits the container's site-packages.
-# This is the magic: --system-site-packages means the venv can see and use
-# the container's torch without reinstalling it.
+# 3. Create a fresh venv (no inheritance — we want a deterministic env).
+# If a previous .venv exists, wipe it.
 # ============================================================================
-if [ ! -d "${VENV_DIR}" ]; then
-    echo "==> Creating venv at ${VENV_DIR} with inherited site-packages ..."
-    uv venv "${VENV_DIR}" --python "${CONTAINER_PYTHON}" --system-site-packages
-else
-    # If the user already created a venv (without --system-site-packages),
-    # remove it and recreate. Otherwise torch is invisible inside.
-    if ! "${VENV_DIR}/bin/python" -c "import torch" 2>/dev/null; then
-        echo "==> Existing venv lacks torch — recreating with --system-site-packages ..."
-        rm -rf "${VENV_DIR}"
-        uv venv "${VENV_DIR}" --python "${CONTAINER_PYTHON}" --system-site-packages
-    else
-        echo "==> Reusing existing venv at ${VENV_DIR} (has torch)."
-    fi
+if [ -d "${VENV_DIR}" ]; then
+    echo "==> Removing previous ${VENV_DIR} for a clean install ..."
+    rm -rf "${VENV_DIR}"
 fi
+echo "==> Creating venv at ${VENV_DIR} using ${CONTAINER_PYTHON} ..."
+uv venv "${VENV_DIR}" --python "${CONTAINER_PYTHON}"
 
 # shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
 
-# Verify torch is visible from inside the venv.
-python -c "import torch; print(f'venv sees torch {torch.__version__}, cuda={torch.cuda.is_available()}')"
+# ============================================================================
+# 4. Install torch FIRST, explicitly pinned to cu128 wheels.
+# This is the load-bearing step. Subsequent uv pip installs will see torch
+# already present at the right version and will not silently upgrade it.
+# ============================================================================
+echo "==> Installing torch ${TORCH_VERSION} from ${TORCH_INDEX} ..."
+uv pip install \
+    "torch==${TORCH_VERSION}" torchvision torchaudio \
+    --index-url "${TORCH_INDEX}"
+
+# Verify what we got.
+python - <<'PY'
+import torch
+print(f"venv torch: {torch.__version__}")
+print(f"venv cuda:  {torch.version.cuda}")
+print(f"cuda available: {torch.cuda.is_available()}")
+assert torch.cuda.is_available(), "FATAL: torch can't see CUDA"
+assert torch.version.cuda.startswith("12.8"), (
+    f"FATAL: expected cu128 torch but got cu{torch.version.cuda}. "
+    f"Resolution went wrong; check the --index-url."
+)
+print(f"gpu: {torch.cuda.get_device_name(0)}")
+print(f"bf16 supported: {torch.cuda.is_bf16_supported()}")
+PY
 
 # ============================================================================
-# 4. Install the training stack INTO the venv (not --system; the venv is
-# where pip is allowed to write under PEP 668).
+# 5. Install the training stack on top.
 # ============================================================================
-echo "==> Installing TRL+PEFT training stack via uv ..."
+echo "==> Installing TRL+PEFT training stack ..."
 uv pip install \
     "transformers>=4.50" \
     "peft>=0.14" \
@@ -112,8 +117,18 @@ uv pip install \
     "wandb>=0.18" \
     "einops"
 
+# Sanity check: torch version should still be cu128 after other installs.
+python - <<'PY'
+import torch
+assert torch.version.cuda.startswith("12.8"), (
+    f"FATAL: torch was upgraded during dep install — now cu{torch.version.cuda}. "
+    f"One of the deps requires a different torch. Pin it below."
+)
+print(f"[verify] torch still at {torch.__version__} after stack install — good.")
+PY
+
 # ============================================================================
-# 5. flash-attn — try prebuilt wheel, fall back to source build, fall back to SDPA.
+# 6. flash-attn — try prebuilt wheel, fall back to source build, fall back to SDPA.
 # ============================================================================
 echo "==> Attempting flash-attn install (non-fatal) ..."
 uv pip install ninja
@@ -126,11 +141,12 @@ if uv pip install flash-attn --no-build-isolation 2>&1 | tee /tmp/flash_attn_ins
     fi
 else
     echo "==> flash-attn install FAILED (see /tmp/flash_attn_install.log)."
-    echo "    Training will use SDPA (default in train_lora.py)."
+    echo "    Training will use SDPA (default in train_lora.py). ~25% slower at seq 12288,"
+    echo "    but acceptable. Continue."
 fi
 
 # ============================================================================
-# 6. HuggingFace login (interactive).
+# 7. HuggingFace login (interactive).
 # ============================================================================
 echo ""
 echo "==> One-time HF login (paste your token from https://huggingface.co/settings/tokens):"
@@ -139,7 +155,7 @@ echo "    Press Ctrl+D to skip."
 hf auth login || echo "  (skipped HF login)"
 
 # ============================================================================
-# 7. W&B login (interactive).
+# 8. W&B login (interactive).
 # ============================================================================
 echo ""
 echo "==> W&B login (paste your key from https://wandb.ai/authorize):"
@@ -147,7 +163,7 @@ echo "    Press Ctrl+D to skip."
 wandb login || echo "  (skipped wandb login; training will fail at report_to=wandb unless WANDB_API_KEY is set)"
 
 # ============================================================================
-# 8. Persist env vars and uv PATH into the venv activation script.
+# 9. Persist env vars into venv activation.
 # ============================================================================
 ACTIVATE="${VENV_DIR}/bin/activate"
 if ! grep -q HF_HUB_ENABLE_HF_TRANSFER "${ACTIVATE}"; then
@@ -161,21 +177,21 @@ fi
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
 # ============================================================================
-# 9. Final report.
+# 10. Final report.
 # ============================================================================
 echo ""
 echo "============================================================"
-echo "Setup complete. Venv at ${VENV_DIR} (inherits container's torch)."
+echo "Setup complete. Venv at ${VENV_DIR}."
 echo ""
 echo "Versions:"
 uv pip show torch transformers peft trl accelerate 2>/dev/null | grep -E '^(Name|Version):' | paste - - | column -t
 echo ""
-echo "Next (in this shell — venv is already active):"
+echo "Venv is active in this shell. For new shells:  source ${VENV_DIR}/bin/activate"
+echo ""
+echo "Next:"
 echo "  python prepare_sft_data.py --in_dir <data> --out_dir out --max_seq_len 12288"
 echo "  python check_a_parse_sanity.py --in_dir out"
 echo "  python train_lora.py --mode pilot     # ~30 min on H100"
 echo "  python check_b_eval.py --adapter out/pilot_lora/final --val out/val_swift.jsonl --n 100"
 echo "  python train_lora.py --mode headline  # ~3-4h on H100"
-echo ""
-echo "For new shells on this pod:  source ${VENV_DIR}/bin/activate"
 echo "============================================================"
