@@ -136,7 +136,7 @@ echo ""
 echo "==> One-time HF login (paste your token from https://huggingface.co/settings/tokens):"
 echo "    Or skip and use anonymous access (Qwen2.5 doesn't require auth)."
 echo "    Press Ctrl+D to skip."
-huggingface-cli login || echo "  (skipped HF login)"
+hf auth login || echo "  (skipped HF login)"
 
 # ============================================================================
 # 7. W&B login (interactive).
