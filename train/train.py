@@ -139,7 +139,7 @@ def main():
 
     profile = PROFILES[args.mode]
     if args.output_dir is None:
-        args.output_dir = f"ououtputs/deepplanning/overseer_sft_dataset/{profile.name}_lora"
+        args.output_dir = f"outputs/deepplanning/overseer_sft_dataset/{profile.name}_lora"
 
     # ------------------------------------------------------------------------
     # Auto-detect attention implementation.
