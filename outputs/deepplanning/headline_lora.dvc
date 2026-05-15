@@ -1,0 +1,6 @@
+outs:
+- md5: 0360a413c0b6d05d272f3dcba12b183b.dir
+  size: 2158254901
+  nfiles: 52
+  hash: md5
+  path: headline_lora
