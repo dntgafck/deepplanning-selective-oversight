@@ -33,6 +33,7 @@ MAX_CPU_LORAS=${MAX_CPU_LORAS:-4}
 GPU_UTIL=${GPU_UTIL:-0.90}
 DTYPE=${DTYPE:-bfloat16}
 
+
 VENV_DIR=${VENV_DIR:-.venv}
 
 # ============================================================================
@@ -97,8 +98,7 @@ echo ""
 # ============================================================================
 exec vllm serve Qwen/Qwen2.5-7B-Instruct \
   --enable-lora \
-  --enable-chunked-prefill \ 
-  --enable-prefix-caching \
+  --enable-chunked-prefill --enable-prefix-caching \
   --max-lora-rank "${MAX_LORA_RANK}" \
   --max-loras "${MAX_LORAS}" \
   --max-cpu-loras "${MAX_CPU_LORAS}" \

@@ -52,7 +52,7 @@ source "${VENV_DIR}/bin/activate"
 #    vllm pulls in transformers and peft as deps, so we don't list those.
 # ============================================================================
 echo "==> Installing vllm (will pull torch, transformers, peft as deps) ..."
-uv pip install --torch-backend=auto vllm hf-transfer
+uv pip install --torch-backend=cu128 "vllm>=0.10,<0.12" hf-transfer
 
 # ============================================================================
 # 5. Sanity check: torch sees CUDA, vllm imports.
