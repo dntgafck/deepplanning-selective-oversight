@@ -131,7 +131,7 @@ PY
 # 6. flash-attn — try prebuilt wheel, fall back to source build, fall back to SDPA.
 # ============================================================================
 echo "==> Attempting flash-attn install (non-fatal) ..."
-uv pip install ninja
+uv pip install ninja wheel
 if uv pip install flash-attn --no-build-isolation 2>&1 | tee /tmp/flash_attn_install.log; then
     if python -c "import flash_attn; print(f'flash-attn: {flash_attn.__version__}')" 2>/dev/null; then
         echo "==> flash-attn installed and importable."
