@@ -21,6 +21,7 @@ set -euo pipefail
 # Config — override via env vars.
 # ============================================================================
 ADAPTER_PATH=${ADAPTER_PATH:?must set ADAPTER_PATH (e.g. /workspace/headline_lora/checkpoint-best)}
+VLLM_API_KEY=${VLLM_API_KEY:?must set VLLM_API_KEY (use a long random string)}
 PORT=${PORT:-8000}
 HOST=${HOST:-0.0.0.0}
 
@@ -106,6 +107,7 @@ exec vllm serve Qwen/Qwen2.5-7B-Instruct \
   --max-model-len "${MAX_MODEL_LEN}" \
   --gpu-memory-utilization "${GPU_UTIL}" \
   --dtype "${DTYPE}" \
+  --api_key "${VLLM_API_KEY}"
   --host "${HOST}" \
   --port "${PORT}"
 
