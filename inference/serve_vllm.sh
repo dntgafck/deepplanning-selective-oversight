@@ -26,7 +26,7 @@ HOST=${HOST:-0.0.0.0}
 
 # Sized for L40S 48GB. For A100 80GB you can push max_model_len higher or
 # raise gpu-memory-utilization.
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}     # matches training seq length
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-32768}     # matches training seq length
 MAX_LORA_RANK=${MAX_LORA_RANK:-16}        # must match adapter's r
 MAX_LORAS=${MAX_LORAS:-2}                 # serve one + headroom for hot-swap
 MAX_CPU_LORAS=${MAX_CPU_LORAS:-4}
@@ -97,6 +97,8 @@ echo ""
 # ============================================================================
 exec vllm serve Qwen/Qwen2.5-7B-Instruct \
   --enable-lora \
+  --enable-chunked-prefill \ 
+  --enable-prefix-caching \
   --max-lora-rank "${MAX_LORA_RANK}" \
   --max-loras "${MAX_LORAS}" \
   --max-cpu-loras "${MAX_CPU_LORAS}" \
