@@ -1,0 +1,6 @@
+outs:
+- md5: 0341a9263d443820907896e52036cee1.dir
+  size: 310008220
+  nfiles: 659
+  hash: md5
+  path: shopping-c2-deepseek-lora

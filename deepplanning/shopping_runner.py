@@ -64,7 +64,7 @@ def _load_split_sample_ids(*, split: str, level: int) -> list[str]:
             f"Shopping split config must be a mapping: {SHOPPING_SPLITS_PATH}"
         )
 
-    split_key = f"{split}_split"
+    split_key = f"{split}"
     level_key = f"level_{level}"
     split_payload = payload.get(split_key)
     if not isinstance(split_payload, dict):
@@ -78,12 +78,59 @@ def _load_split_sample_ids(*, split: str, level: int) -> list[str]:
 
 def _resolve_split_value(split: str) -> str:
     normalized = str(split).strip()
-    if normalized not in VALID_SHOPPING_SPLITS:
-        available = ", ".join(sorted(VALID_SHOPPING_SPLITS))
-        raise ValueError(
-            f"Unsupported shopping split '{split}'. Expected one of: {available}"
-        )
     return normalized
+
+
+def _normalize_contract_reuse_config(
+    contract_reuse: dict[str, Any] | object | None,
+) -> dict[str, Any]:
+    if contract_reuse is None:
+        return {}
+    if OmegaConf.is_config(contract_reuse):
+        payload = OmegaConf.to_container(contract_reuse, resolve=True)
+    elif isinstance(contract_reuse, dict):
+        payload = dict(contract_reuse)
+    else:
+        payload = {
+            "enabled": getattr(contract_reuse, "enabled", False),
+            "path_template": getattr(contract_reuse, "path_template", ""),
+        }
+    if not isinstance(payload, dict):
+        raise ValueError("shopping.contract_reuse must be a mapping.")
+    return payload
+
+
+def _resolve_contract_reuse_path(
+    *,
+    contract_reuse: dict[str, Any] | object | None,
+    level: int,
+) -> Path | None:
+    payload = _normalize_contract_reuse_config(contract_reuse)
+    if not bool(payload.get("enabled", False)):
+        return None
+
+    path_template = str(payload.get("path_template") or "").strip()
+    if not path_template:
+        raise ValueError(
+            "shopping.contract_reuse.path_template must be set when contract reuse "
+            f"is enabled for shopping level {level}."
+        )
+
+    try:
+        configured_path = path_template.format(level=level)
+    except Exception as exc:
+        raise ValueError(
+            "Invalid shopping.contract_reuse.path_template for shopping level "
+            f"{level}: {path_template!r}"
+        ) from exc
+
+    resolved_path = resolve_repo_path(configured_path)
+    if not resolved_path.exists():
+        raise FileNotFoundError(
+            "Missing static shopping execution contract artifact for level "
+            f"{level}: {configured_path} (resolved to {resolved_path})"
+        )
+    return resolved_path
 
 
 def evaluate_database(
@@ -165,6 +212,7 @@ def run(
     output_root: str | Path | None = None,
     langfuse_session_id: str | None = None,
     system_defaults: dict[str, Any] | None = None,
+    contract_reuse: dict[str, Any] | object | None = None,
 ) -> None:
     load_dotenv()
     evaluation_pipeline, score_statistics = import_modules()
@@ -195,6 +243,10 @@ def run(
         model_output_root = ensure_directory(output_root_path / model)
 
         for level in level_numbers:
+            static_contract_path = _resolve_contract_reuse_path(
+                contract_reuse=contract_reuse,
+                level=level,
+            )
             source_database_dir = SHOPPING_DATA_ROOT / f"database_level{level}"
             if not source_database_dir.exists():
                 raise FileNotFoundError(
@@ -273,6 +325,7 @@ def run(
                 output_dir_by_run=run_output_dirs,
                 per_run_seed_by_run=per_run_seed_by_run,
                 shared_oversight_cache_root=shared_oversight_cache_root,
+                static_execution_contract_path=static_contract_path,
                 session_id=langfuse_session_id,
             )
             print(

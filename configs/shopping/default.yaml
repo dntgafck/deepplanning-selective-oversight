@@ -2,3 +2,6 @@ levels:
   - 1
 split: all
 sample_ids: []
+contract_reuse:
+  enabled: false
+  path_template: ""

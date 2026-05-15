@@ -8,13 +8,13 @@ from typing import Any
 
 import fire
 
-
 DEFAULT_MAX_SEQ_LEN = 16384
 DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
 
 def _load_tokenizer(base_model: str) -> Any:
     from transformers import AutoTokenizer
+
     return AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
 
 
@@ -22,7 +22,9 @@ def _build_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
     messages = list(record["input_messages"])
     pair_id = record.get("pair_id", "<unknown>")
     if len(messages) != 2:
-        raise ValueError(f"expected 2 input messages, got {len(messages)} for {pair_id}")
+        raise ValueError(
+            f"expected 2 input messages, got {len(messages)} for {pair_id}"
+        )
     if messages[0].get("role") != "system":
         raise ValueError(f"first message must be system for {pair_id}")
     if messages[1].get("role") != "user":
@@ -101,10 +103,11 @@ def process_split(
     kept_lengths: list[int] = []
     all_lengths: list[int] = []
 
-    with src_path.open(encoding="utf-8") as input_file, out_path.open(
-        "w", encoding="utf-8"
-    ) as output_file:
-        for line_number, line in enumerate(input_file, start=1):
+    with (
+        src_path.open(encoding="utf-8") as input_file,
+        out_path.open("w", encoding="utf-8") as output_file,
+    ):
+        for _line_number, line in enumerate(input_file, start=1):
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -165,7 +168,9 @@ def process_split(
     )
 
 
-def _report_config(in_dir: Path, out_dir: Path, max_seq_len: int, base_model: str) -> dict:
+def _report_config(
+    in_dir: Path, out_dir: Path, max_seq_len: int, base_model: str
+) -> dict:
     return {
         "in_dir": str(in_dir),
         "out_dir": str(out_dir),
@@ -261,7 +266,9 @@ def main(
     for split_name, stats in (("train", train_stats), ("val", val_stats)):
         keep_rate = stats["out"] / stats["in"] if stats["in"] else 0
         drop_rate = stats["dropped_too_long"] / stats["in"] if stats["in"] else 0
-        print(f"\n[{split_name}]  in={stats['in']}  out={stats['out']}  ({keep_rate:.1%} kept)")
+        print(
+            f"\n[{split_name}]  in={stats['in']}  out={stats['out']}  ({keep_rate:.1%} kept)"
+        )
         print(
             f"  dropped too long (> {max_seq_len}): {stats['dropped_too_long']} "
             f"({drop_rate:.1%})"

@@ -43,10 +43,10 @@ from peft import LoraConfig
 from transformers import AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-
 # ============================================================================
 # Configuration profiles for pilot vs headline.
 # ============================================================================
+
 
 @dataclass
 class TrainProfile:
@@ -55,7 +55,9 @@ class TrainProfile:
     eval_steps: int
     save_steps: int
     save_strategy: str
-    eval_subsample: Optional[int]   # subsample val to this size for in-loop eval (None = use all)
+    eval_subsample: Optional[
+        int
+    ]  # subsample val to this size for in-loop eval (None = use all)
     train_subsample: Optional[int]  # subsample train to this size (None = use all)
     run_name: str
     wandb_project: str
@@ -66,9 +68,9 @@ PROFILES = {
         name="pilot",
         num_train_epochs=1.0,
         eval_steps=25,
-        save_steps=999999,         # save once at end via save_strategy=epoch
+        save_steps=999999,  # save once at end via save_strategy=epoch
         save_strategy="epoch",
-        eval_subsample=200,        # 200 pairs for in-loop eval — keeps pilot under 1h total
+        eval_subsample=200,  # 200 pairs for in-loop eval — keeps pilot under 1h total
         train_subsample=1000,
         run_name="pilot-qwen25-r16-1ep-1k",
         wandb_project="overseer-lora-pilot",
@@ -79,7 +81,7 @@ PROFILES = {
         eval_steps=200,
         save_steps=200,
         save_strategy="steps",
-        eval_subsample=300,        # 300 pairs for in-loop eval (full val saved for offline check_b_eval)
+        eval_subsample=300,  # 300 pairs for in-loop eval (full val saved for offline check_b_eval)
         train_subsample=None,
         run_name="headline-qwen25-r16-3ep",
         wandb_project="overseer-lora-headline",
@@ -94,7 +96,10 @@ PROFILES = {
 # and are ignored at training time.
 # ============================================================================
 
-def load_jsonl(path: Path, subsample: Optional[int], seed: int, max_seq_len: Optional[int] = None) -> Dataset:
+
+def load_jsonl(
+    path: Path, subsample: Optional[int], seed: int, max_seq_len: Optional[int] = None
+) -> Dataset:
     with path.open() as f:
         records = [json.loads(line) for line in f]
     if max_seq_len is not None:
@@ -108,18 +113,29 @@ def load_jsonl(path: Path, subsample: Optional[int], seed: int, max_seq_len: Opt
     dataset_records = [{"messages": r["messages"]} for r in records]
     return Dataset.from_list(dataset_records)
 
+
 # ============================================================================
 # Main.
 # ============================================================================
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["pilot", "headline"], required=True)
     parser.add_argument("--base_model", default="Qwen/Qwen2.5-7B-Instruct")
-    parser.add_argument("--train_path", default="outputs/deepplanning/overseer_sft_dataset/train_swift.jsonl")
-    parser.add_argument("--val_path", default="outputs/deepplanning/overseer_sft_dataset/val_swift.jsonl")
-    parser.add_argument("--output_dir", default=None,
-                        help="Default: out/pilot_lora or out/headline_lora based on --mode")
+    parser.add_argument(
+        "--train_path",
+        default="outputs/deepplanning/overseer_sft_dataset/train_swift.jsonl",
+    )
+    parser.add_argument(
+        "--val_path",
+        default="outputs/deepplanning/overseer_sft_dataset/val_swift.jsonl",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default=None,
+        help="Default: out/pilot_lora or out/headline_lora based on --mode",
+    )
     parser.add_argument("--max_seq_length", type=int, default=12288)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--report_to", default="wandb", choices=["wandb", "none"])
@@ -133,13 +149,18 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--warmup_ratio", type=float, default=0.05)
     # Attention implementation — flash_attention_2 if available, sdpa otherwise.
-    parser.add_argument("--attn_impl", default=None,
-                        help="Default: auto-detect. flash_attention_2 if importable, else sdpa.")
+    parser.add_argument(
+        "--attn_impl",
+        default=None,
+        help="Default: auto-detect. flash_attention_2 if importable, else sdpa.",
+    )
     args = parser.parse_args()
 
     profile = PROFILES[args.mode]
     if args.output_dir is None:
-        args.output_dir = f"outputs/deepplanning/overseer_sft_dataset/{profile.name}_lora"
+        args.output_dir = (
+            f"outputs/deepplanning/overseer_sft_dataset/{profile.name}_lora"
+        )
 
     # ------------------------------------------------------------------------
     # Auto-detect attention implementation.
@@ -147,6 +168,7 @@ def main():
     if args.attn_impl is None:
         try:
             import flash_attn  # noqa: F401
+
             args.attn_impl = "flash_attention_2"
             print(f"[setup] flash-attn is importable; using {args.attn_impl}")
         except ImportError:
@@ -173,14 +195,20 @@ def main():
         # Look for an unused special token to use as pad.
         if "<|fim_pad|>" in tokenizer.get_vocab():
             tokenizer.pad_token = "<|fim_pad|>"
-            print(f"[data] separated pad_token from eos_token: pad={tokenizer.pad_token!r}")
+            print(
+                f"[data] separated pad_token from eos_token: pad={tokenizer.pad_token!r}"
+            )
 
     print(f"[data] loading train from {args.train_path}")
-    train_ds = load_jsonl(Path(args.train_path), profile.train_subsample, args.seed, args.max_seq_length)
+    train_ds = load_jsonl(
+        Path(args.train_path), profile.train_subsample, args.seed, args.max_seq_length
+    )
     print(f"[data]   train size after subsample: {len(train_ds)}")
 
     print(f"[data] loading val from {args.val_path}")
-    val_ds = load_jsonl(Path(args.val_path), profile.eval_subsample, args.seed, args.max_seq_length)
+    val_ds = load_jsonl(
+        Path(args.val_path), profile.eval_subsample, args.seed, args.max_seq_length
+    )
     print(f"[data]   val size after subsample: {len(val_ds)}")
 
     # ------------------------------------------------------------------------
@@ -261,7 +289,9 @@ def main():
     print(f"[train]   base model: {args.base_model}")
     print(f"[train]   attn impl: {args.attn_impl}")
     print(f"[train]   max_length: {args.max_seq_length}")
-    print(f"[train]   effective batch: {args.per_device_batch_size * args.gradient_accumulation_steps}")
+    print(
+        f"[train]   effective batch: {args.per_device_batch_size * args.gradient_accumulation_steps}"
+    )
     print(f"[train]   epochs: {profile.num_train_epochs}")
     print(f"[train]   output_dir: {args.output_dir}")
 
@@ -287,11 +317,15 @@ def main():
 
     print("\n========== DONE ==========")
     print(f"Adapter: {final_dir}")
-    print(f"Next:")
+    print("Next:")
     if profile.name == "pilot":
-        print(f"  python check_b_eval.py --adapter {final_dir} --val out/val_swift.jsonl --n 100")
+        print(
+            f"  python check_b_eval.py --adapter {final_dir} --val out/val_swift.jsonl --n 100"
+        )
     else:
-        print(f"  python check_b_eval.py --adapter {final_dir} --val out/val_swift.jsonl --n 500")
+        print(
+            f"  python check_b_eval.py --adapter {final_dir} --val out/val_swift.jsonl --n 500"
+        )
         print(f"  ADAPTER_PATH={final_dir} bash serve_vllm.sh")
 
 

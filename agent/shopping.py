@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import time
@@ -41,6 +42,7 @@ from oversight.base import OversightContext, OversightController
 from oversight.contracts import (
     load_or_build_execution_contract_with_metadata,
     load_or_build_task_checklist_with_metadata,
+    parse_execution_contract_json,
 )
 from oversight.factory import build_oversight_controller
 
@@ -515,6 +517,31 @@ def _cleanup_case_retry_snapshot(snapshot: tuple[Path, Path] | None) -> None:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
 
 
+def _load_static_execution_contract_with_metadata(
+    path: str | Path,
+    *,
+    level: int | None,
+) -> tuple[Any, str, str]:
+    contract_path = Path(path)
+    if not contract_path.exists():
+        raise FileNotFoundError(
+            "Missing static shopping execution contract artifact for level "
+            f"{level if level is not None else 'unknown'}: {contract_path}"
+        )
+
+    try:
+        raw_bytes = contract_path.read_bytes()
+        contract = parse_execution_contract_json(raw_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(
+            "Invalid static shopping execution contract artifact for level "
+            f"{level if level is not None else 'unknown'} at {contract_path}: {exc}"
+        ) from exc
+
+    cache_key = f"static:{hashlib.sha256(raw_bytes).hexdigest()}"
+    return contract, cache_key, "static_contract"
+
+
 class ShoppingAgentRunner(VendorShoppingFnAgent):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         clear_vendored_tool_module_cache()
@@ -532,6 +559,7 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
         sample_id: str | None = None,
         messages_output_dir: str | None = None,
         shared_oversight_cache_root: Path | None = None,
+        static_execution_contract_path: str | Path | None = None,
         trace_id: str | None = None,
         session_id: str | None = None,
     ) -> TaskResult:
@@ -566,23 +594,31 @@ class ShoppingAgentRunner(VendorShoppingFnAgent):
             if cache_root is None:
                 cache_root = Path(self.database_base_path).parent / "_oversight_cache"
             cache_root.mkdir(parents=True, exist_ok=True)
-            contract, contract_cache_key, contract_cache_status = (
-                await load_or_build_execution_contract_with_metadata(
-                    domain="shopping",
-                    executor_system_prompt=system_prompt or "",
-                    tool_schema=self.openai_tools,
-                    system_config=system_config,
-                    cache_root=cache_root,
-                    observability=_overseer_setup_observability(
-                        state=state,
-                        system_config=system_config,
-                        run_id=run_id,
-                        trace_id=trace_id,
-                        session_id=session_id,
-                        trigger_type="compile_contract",
-                    ),
+            if static_execution_contract_path is not None:
+                contract, contract_cache_key, contract_cache_status = (
+                    _load_static_execution_contract_with_metadata(
+                        static_execution_contract_path,
+                        level=state.complexity,
+                    )
                 )
-            )
+            else:
+                contract, contract_cache_key, contract_cache_status = (
+                    await load_or_build_execution_contract_with_metadata(
+                        domain="shopping",
+                        executor_system_prompt=system_prompt or "",
+                        tool_schema=self.openai_tools,
+                        system_config=system_config,
+                        cache_root=cache_root,
+                        observability=_overseer_setup_observability(
+                            state=state,
+                            system_config=system_config,
+                            run_id=run_id,
+                            trace_id=trace_id,
+                            session_id=session_id,
+                            trigger_type="compile_contract",
+                        ),
+                    )
+                )
             state.execution_contract = contract
             await _log_oversight_artifact(
                 logger=logger,
@@ -1276,6 +1312,7 @@ async def run_agent_inference_async(
     output_dir_by_run: dict[int, Path] | None = None,
     per_run_seed_by_run: dict[int, int] | None = None,
     shared_oversight_cache_root: Path | None = None,
+    static_execution_contract_path: str | Path | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
     system_defaults: dict[str, Any] | None = None,
@@ -1407,6 +1444,7 @@ async def run_agent_inference_async(
                         save_messages=True,
                         sample_id=sample_id,
                         shared_oversight_cache_root=shared_oversight_cache_root,
+                        static_execution_contract_path=static_execution_contract_path,
                         trace_id=sample_trace_id,
                         session_id=session_id,
                     )
@@ -1579,6 +1617,7 @@ def run_agent_inference(
     output_dir_by_run: dict[int, Path] | None = None,
     per_run_seed_by_run: dict[int, int] | None = None,
     shared_oversight_cache_root: Path | None = None,
+    static_execution_contract_path: str | Path | None = None,
     trace_id: str | None = None,
     session_id: str | None = None,
     system_defaults: dict[str, Any] | None = None,
@@ -1603,6 +1642,7 @@ def run_agent_inference(
                 output_dir_by_run=output_dir_by_run,
                 per_run_seed_by_run=per_run_seed_by_run,
                 shared_oversight_cache_root=shared_oversight_cache_root,
+                static_execution_contract_path=static_execution_contract_path,
                 trace_id=trace_id,
                 session_id=session_id,
                 system_defaults=system_defaults,

@@ -1,0 +1,6 @@
+outs:
+- md5: 26ff5c9dd8a4952295c19c3092f8f2cb.dir
+  size: 740552200
+  nfiles: 659
+  hash: md5
+  path: shopping-c2-lora

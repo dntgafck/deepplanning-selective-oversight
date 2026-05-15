@@ -304,6 +304,7 @@ def run_benchmark_from_cfg(cfg: Any, benchmark_output_root: Path) -> None:
             levels=shopping_cfg.get("levels"),
             split=str(shopping_cfg.get("split", "all") or "all"),
             sample_ids=shopping_cfg.get("sample_ids"),
+            contract_reuse=shopping_cfg.get("contract_reuse"),
             system=system_name,
             system_defaults=system_cfg,
             workers=int(runtime_cfg.get("workers", 20)),

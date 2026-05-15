@@ -210,6 +210,33 @@ def _fake_completion_factory(
     return _fake_call
 
 
+class _SetupOnlyOversightController:
+    profile = "test_setup_only"
+
+    def is_active_for_task(self, *, state, system_config) -> bool:
+        return True
+
+    def is_active_for_hook(self, *, state, system_config, hook) -> bool:
+        return False
+
+
+def _write_static_shopping_contract(
+    path: Path,
+    *,
+    compiler_signature: str = "static-overseer-signature",
+) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                **_shopping_contract_payload(),
+                "compiler_signature": compiler_signature,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _install_c2_lite_mocks(
     monkeypatch,
     *,
@@ -505,6 +532,263 @@ def test_shopping_runner_breaks_phase_one_and_adds_cart_message(monkeypatch, tmp
     records = _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
     assert [record["phase"] for record in records] == ["initial", "cart_check"]
     assert records[1]["request_messages"][-1]["role"] == "user"
+
+
+def test_shopping_static_contract_loading_bypasses_contract_builder(
+    monkeypatch, tmp_path
+):
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+    contract_path = _write_static_shopping_contract(
+        tmp_path / "static_contract.json",
+        compiler_signature="reused-static-signature",
+    )
+
+    async def fail_contract_builder(**_kwargs):
+        raise AssertionError("contract builder should not be called")
+
+    checklist_calls: list[dict[str, object]] = []
+
+    async def fake_checklist_builder(**kwargs):
+        checklist_calls.append(kwargs)
+        return (
+            oversight_contracts.parse_task_checklist_json(
+                {
+                    **_shopping_checklist_payload(),
+                    "compiler_signature": "checklist-signature",
+                }
+            ),
+            "checklist-key",
+            "built",
+        )
+
+    monkeypatch.setattr(
+        shopping_module,
+        "_resolve_shopping_oversight_controller",
+        lambda _system_config: _SetupOnlyOversightController(),
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "load_or_build_execution_contract_with_metadata",
+        fail_contract_builder,
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "load_or_build_task_checklist_with_metadata",
+        fake_checklist_builder,
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(content="Phase one complete."),
+                FakeResponse(content="Cart verified."),
+            ]
+        ),
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="B",
+    )
+    logger = StructuredLogger(tmp_path / "shopping_logs")
+    system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
+
+    result = asyncio.run(
+        runner.run_task(
+            user_query="test shopping query",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            logger=logger,
+            sample_id="1",
+            static_execution_contract_path=contract_path,
+        )
+    )
+
+    assert result.output == "Cart verified."
+    assert state.execution_contract is not None
+    assert state.execution_contract.compiler_signature == "reused-static-signature"
+    assert checklist_calls[0]["execution_contract"].compiler_signature == (
+        "reused-static-signature"
+    )
+
+    artifact_events = [
+        record
+        for record in _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
+        if record["event_type"] == "oversight_artifact"
+    ]
+    contract_event = next(
+        event
+        for event in artifact_events
+        if event["artifact_type"] == "execution_contract"
+    )
+    assert contract_event["cache_status"] == "static_contract"
+    assert contract_event["cache_key"].startswith("static:")
+    assert contract_event["compiler_signature"] == "reused-static-signature"
+
+
+def test_shopping_static_contract_invalid_shape_raises_clear_error(tmp_path):
+    contract_path = tmp_path / "bad_contract.json"
+    contract_path.write_text(
+        json.dumps(
+            {
+                **_shopping_contract_payload(),
+                "hard_rules": ["invalid shape"],
+                "compiler_signature": "bad-static-signature",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Invalid static shopping execution contract artifact for level 2 "
+            r".*bad_contract\.json"
+        ),
+    ):
+        shopping_module._load_static_execution_contract_with_metadata(
+            contract_path,
+            level=2,
+        )
+
+
+def test_shopping_contract_reuse_missing_artifact_names_level_and_path(tmp_path):
+    path_template = str(tmp_path / "missing_level_{level}.json")
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"level 3: .*missing_level_3\.json",
+    ):
+        shopping_runtime_module._resolve_contract_reuse_path(
+            contract_reuse={
+                "enabled": True,
+                "path_template": path_template,
+            },
+            level=3,
+        )
+
+
+def test_shopping_default_contract_reuse_disabled_uses_contract_cache_builder(
+    monkeypatch, tmp_path
+):
+    default_shopping = OmegaConf.load(
+        REPO_ROOT / "configs" / "shopping" / "default.yaml"
+    )
+    assert (
+        shopping_runtime_module._resolve_contract_reuse_path(
+            contract_reuse=default_shopping.contract_reuse,
+            level=1,
+        )
+        is None
+    )
+
+    run_database_dir = tmp_path / "shopping_db"
+    shutil.copytree(SHOPPING_FIXTURE_ROOT, run_database_dir)
+    contract_builder_calls: list[dict[str, object]] = []
+
+    async def fake_contract_builder(**kwargs):
+        contract_builder_calls.append(kwargs)
+        return (
+            oversight_contracts.parse_execution_contract_json(
+                {
+                    **_shopping_contract_payload(),
+                    "compiler_signature": "cache-contract-signature",
+                }
+            ),
+            "cache-contract-key",
+            "hit",
+        )
+
+    async def fake_checklist_builder(**_kwargs):
+        return (
+            oversight_contracts.parse_task_checklist_json(
+                {
+                    **_shopping_checklist_payload(),
+                    "compiler_signature": "checklist-signature",
+                }
+            ),
+            "checklist-key",
+            "hit",
+        )
+
+    monkeypatch.setattr(
+        shopping_module,
+        "_resolve_shopping_oversight_controller",
+        lambda _system_config: _SetupOnlyOversightController(),
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "load_or_build_execution_contract_with_metadata",
+        fake_contract_builder,
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "load_or_build_task_checklist_with_metadata",
+        fake_checklist_builder,
+    )
+    monkeypatch.setattr(
+        shopping_module,
+        "call_chat_completion",
+        _fake_completion_factory(
+            [
+                FakeResponse(content="Phase one complete."),
+                FakeResponse(content="Cart verified."),
+            ]
+        ),
+    )
+
+    runner = shopping_module.ShoppingAgentRunner(
+        model="qwen3.5-9b",
+        sample_id="1",
+        database_base_path=str(run_database_dir),
+        tool_schema_path=str(SHOPPING_SCHEMA_PATH),
+    )
+    state = ConversationState(
+        task_id="1",
+        domain="shopping",
+        complexity=1,
+        system_config_name="B",
+    )
+    logger = StructuredLogger(tmp_path / "shopping_logs")
+    system_config = build_system_config("B", executor_model="qwen3.5-9b", max_steps=2)
+
+    asyncio.run(
+        runner.run_task(
+            user_query="test shopping query",
+            system_prompt=shopping_module.get_system_prompt(1),
+            state=state,
+            system_config=system_config,
+            logger=logger,
+            sample_id="1",
+        )
+    )
+
+    assert len(contract_builder_calls) == 1
+    assert contract_builder_calls[0]["domain"] == "shopping"
+    artifact_events = [
+        record
+        for record in _load_jsonl(tmp_path / "shopping_logs" / "agent_events.jsonl")
+        if record["event_type"] == "oversight_artifact"
+    ]
+    contract_event = next(
+        event
+        for event in artifact_events
+        if event["artifact_type"] == "execution_contract"
+    )
+    assert contract_event["cache_key"] == "cache-contract-key"
+    assert contract_event["cache_status"] == "hit"
+    assert contract_event["compiler_signature"] == "cache-contract-signature"
 
 
 def test_shopping_runner_gives_phase_two_a_fresh_budget_and_omits_tool_name(
@@ -3543,6 +3827,7 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
                 "langfuse_session_id": kwargs["langfuse_session_id"],
                 "overseer_model": kwargs["overseer_model"],
                 "split": kwargs["split"],
+                "contract_reuse": kwargs["contract_reuse"],
                 "system_defaults": kwargs["system_defaults"],
             }
         ),
@@ -3575,7 +3860,15 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
                 "coverage_threshold": 0.11,
             },
             "runtime": {"workers": 1, "max_llm_calls": 20, "runs": 4},
-            "shopping": {"levels": [1], "split": "test", "sample_ids": []},
+            "shopping": {
+                "levels": [1],
+                "split": "test",
+                "sample_ids": [],
+                "contract_reuse": {
+                    "enabled": True,
+                    "path_template": "outputs/deepplanning/contracts/shopping/c2_deepseek/level_{level}.json",
+                },
+            },
             "travel": {
                 "language": "en",
                 "start_from": "inference",
@@ -3595,6 +3888,10 @@ def test_run_benchmark_from_cfg_launches_selected_domains_and_aggregates(monkeyp
             "langfuse_session_id": "bench-session",
             "overseer_model": "deepseek-v4-flash",
             "split": "test",
+            "contract_reuse": {
+                "enabled": True,
+                "path_template": "outputs/deepplanning/contracts/shopping/c2_deepseek/level_{level}.json",
+            },
             "system_defaults": {
                 "name": "C2",
                 "loop_similarity_threshold": 0.99,

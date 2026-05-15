@@ -4,7 +4,6 @@ import json
 import sys
 from pathlib import Path
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks"))
 import analysis_lib as al  # noqa: E402
 
@@ -63,9 +62,7 @@ def _write_session(
         encoding="utf-8",
     )
     (
-        session_root
-        / "aggregated_results"
-        / f"{model}_run_{run_id}_aggregated.json"
+        session_root / "aggregated_results" / f"{model}_run_{run_id}_aggregated.json"
     ).write_text(
         json.dumps(
             {

@@ -24,7 +24,9 @@ class FakeTokenizer:
     ) -> str:
         assert tokenize is False
         self.enable_thinking_values.append(enable_thinking)
-        return "\n".join(f"{message['role']}: {message['content']}" for message in messages)
+        return "\n".join(
+            f"{message['role']}: {message['content']}" for message in messages
+        )
 
     def __call__(self, text: str, *, add_special_tokens: bool) -> dict[str, list[int]]:
         assert add_special_tokens is False
@@ -106,11 +108,15 @@ def test_prepare_sft_data_converts_train_val_and_never_opens_held_out(
 
     train_rows = [
         json.loads(line)
-        for line in (out_dir / "train_swift.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (out_dir / "train_swift.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     val_rows = [
         json.loads(line)
-        for line in (out_dir / "val_swift.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (out_dir / "val_swift.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     report = json.loads(
         (out_dir / "stratification_report.json").read_text(encoding="utf-8")

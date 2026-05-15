@@ -1,0 +1,6 @@
+outs:
+- md5: e9ae71113700373d8645917269437200.dir
+  size: 6562
+  nfiles: 3
+  hash: md5
+  path: c2_deepseek

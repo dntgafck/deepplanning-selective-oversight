@@ -1,0 +1,9 @@
+levels:
+  - 1
+  - 2
+  - 3
+split: hold_out
+sample_ids: []
+contract_reuse:
+  enabled: true
+  path_template: outputs/deepplanning/contracts/shopping/c2_deepseek/level_{level}.json
