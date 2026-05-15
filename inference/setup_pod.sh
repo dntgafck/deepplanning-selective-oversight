@@ -20,10 +20,6 @@ VENV_DIR=${VENV_DIR:-.venv}
 # ============================================================================
 # 1. Verify host CUDA + Python.
 # ============================================================================
-echo "==> nvidia-smi check:"
-nvidia-smi > /dev/null 2>&1 || { echo "FATAL: nvidia-smi failed"; exit 1; }
-nvidia-smi | head -10
-
 CONTAINER_PYTHON=${CONTAINER_PYTHON:-$(which python3)}
 echo "==> Container python: ${CONTAINER_PYTHON}"
 "${CONTAINER_PYTHON}" --version
@@ -56,7 +52,7 @@ source "${VENV_DIR}/bin/activate"
 #    vllm pulls in transformers and peft as deps, so we don't list those.
 # ============================================================================
 echo "==> Installing vllm (will pull torch, transformers, peft as deps) ..."
-uv pip install vllm hf-transfer
+uv pip install --torch-backend=auto vllm hf-transfer
 
 # ============================================================================
 # 5. Sanity check: torch sees CUDA, vllm imports.
@@ -79,7 +75,7 @@ PY
 # ============================================================================
 echo ""
 echo "==> Optional HF login. Press Ctrl+D to skip."
-huggingface-cli login || echo "  (skipped HF login)"
+hf auth login || echo "  (skipped HF login)"
 
 # ============================================================================
 # 7. Persist env vars.
