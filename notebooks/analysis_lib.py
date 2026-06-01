@@ -1,9 +1,9 @@
 """
 Analysis library for selective-oversight thesis experiments.
 
-Loads output session directories or legacy result archives plus Langfuse cost
-CSV, then produces per-system / per-level summary tables, per-case dataframes
-for head-to-heads, and cost rollups.
+Loads output session directories or legacy result archives plus Langfuse token
+usage exports, then produces per-system / per-level summary tables, per-case
+dataframes for head-to-heads, and cost rollups.
 
 Designed to be re-runnable from a notebook with minimal path edits.
 """
@@ -12,11 +12,19 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from llm.pricing import resolve_pricing_calculator
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -80,17 +88,7 @@ SYSTEM_META = {
     "D": {"executor": "deepseek-v4-flash", "overseer": None, "kind": "monolithic"},
 }
 
-# DeepSeek pricing per 1M tokens (deepseek-v4-flash list price; user can edit).
-# Source: deepseek API current pricing tier; we report both as-billed and uncached
-# variants so any pricing drift only changes magnitude, not the qualitative story.
-PRICE_DS_INPUT_UNCACHED = 0.14  # USD / 1M tokens
-PRICE_DS_INPUT_CACHED = 0.0028  # USD / 1M tokens (cache hit)
-PRICE_DS_OUTPUT = 0.28  # USD / 1M tokens
-
-# Qwen3.5-9B via Together.ai (open-weight tier; user can edit).
-PRICE_QWEN_INPUT = 0.10  # USD / 1M tokens
-PRICE_QWEN_OUTPUT = 0.15  # USD / 1M tokens
-# Qwen does not have a separate cached price in our Langfuse data (0% cached).
+DEFAULT_MODELS_CONFIG = REPO_ROOT / "configs" / "models.yaml"
 
 
 # -----------------------------------------------------------------------------
@@ -571,6 +569,120 @@ def load_langfuse(csv_path: Path) -> pd.DataFrame:
     return df
 
 
+def load_trace_tokens(
+    csv_path: Path,
+    *,
+    session_runs: dict[str, int] | pd.Series | None = None,
+    session_ids: Iterable[str] | None = None,
+    split: str | None = None,
+) -> pd.DataFrame:
+    """Load observation-level trace token summaries.
+
+    Expected input is produced by scripts/export_langfuse_trace_tokens.py. The
+    returned frame matches load_langfuse's long-format schema so existing token
+    and local-cost helpers can consume it.
+    """
+    raw = pd.read_csv(csv_path)
+    required = {
+        "system",
+        "experiment_name",
+        "session_id",
+        "split",
+        "role",
+        "model",
+        "input_uncached_tokens",
+        "input_cached_tokens",
+        "output_total_tokens",
+        "total_tokens",
+    }
+    missing = sorted(required - set(raw.columns))
+    if missing:
+        raise ValueError(f"Trace token summary is missing columns: {missing}")
+
+    raw = raw.copy()
+    raw["session_key"] = raw["session_id"].astype(str)
+    if session_ids is not None:
+        wanted_sessions = {str(session_id) for session_id in session_ids}
+        raw = raw[raw["session_key"].isin(wanted_sessions)].copy()
+    if split is not None:
+        raw = raw[raw["split"].fillna("").astype(str) == str(split)].copy()
+
+    if raw.empty:
+        return pd.DataFrame(
+            columns=[
+                "system",
+                "role",
+                "model",
+                "experiment_name",
+                "session_key",
+                "input_uncached",
+                "input_cached",
+                "output",
+                "total",
+                "runs",
+                "input_total",
+                "per_run_input_uncached",
+                "per_run_input_cached",
+                "per_run_output",
+                "per_run_total",
+                "cache_hit_rate",
+            ]
+        )
+
+    if session_runs is None:
+        run_lookup = {
+            str(session_id): 1 for session_id in raw["session_key"].dropna().unique()
+        }
+    else:
+        run_lookup = {
+            str(session_id): int(runs)
+            for session_id, runs in dict(session_runs).items()
+        }
+    raw["runs"] = raw["session_key"].map(run_lookup).fillna(1).astype(int)
+    raw["input_uncached"] = pd.to_numeric(
+        raw["input_uncached_tokens"], errors="coerce"
+    ).fillna(0)
+    raw["input_cached"] = pd.to_numeric(
+        raw["input_cached_tokens"], errors="coerce"
+    ).fillna(0)
+    raw["output"] = pd.to_numeric(raw["output_total_tokens"], errors="coerce").fillna(0)
+    raw["total"] = pd.to_numeric(raw["total_tokens"], errors="coerce").fillna(0)
+
+    runs_by_system = (
+        raw[["system", "session_key", "runs"]]
+        .drop_duplicates()
+        .groupby("system")["runs"]
+        .sum()
+    )
+    df = (
+        raw.groupby(["system", "role", "model"], as_index=False)
+        .agg(
+            experiment_name=(
+                "experiment_name",
+                lambda values: ",".join(sorted(set(values))),
+            ),
+            session_key=("session_key", lambda values: ",".join(sorted(set(values)))),
+            input_uncached=("input_uncached", "sum"),
+            input_cached=("input_cached", "sum"),
+            output=("output", "sum"),
+            total=("total", "sum"),
+        )
+        .reset_index(drop=True)
+    )
+    df["runs"] = df["system"].map(runs_by_system).astype(int)
+    df["input_total"] = df["input_uncached"] + df["input_cached"]
+    df["per_run_input_uncached"] = df["input_uncached"] / df["runs"]
+    df["per_run_input_cached"] = df["input_cached"] / df["runs"]
+    df["per_run_output"] = df["output"] / df["runs"]
+    df["per_run_total"] = df["total"] / df["runs"]
+    df["cache_hit_rate"] = np.where(
+        df["input_total"] > 0,
+        df["input_cached"] / df["input_total"],
+        np.nan,
+    )
+    return df
+
+
 def system_token_summary(lf: pd.DataFrame) -> pd.DataFrame:
     """One row per system with tokens summed across roles, per-run averaged."""
     g = lf.groupby("system", as_index=False).agg(
@@ -596,39 +708,121 @@ def system_token_summary(lf: pd.DataFrame) -> pd.DataFrame:
     return g.sort_values("system").reset_index(drop=True)
 
 
-def cost_dollars(lf: pd.DataFrame) -> pd.DataFrame:
+def _normalize_model_alias(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _load_model_pricing(models_config_path: Path | None = None) -> dict[str, dict]:
+    """Load per-model pricing from configs/models.yaml, keyed by known aliases."""
+    config_path = Path(models_config_path or DEFAULT_MODELS_CONFIG)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), dict):
+        raise ValueError(f"Expected models mapping in {config_path}")
+
+    pricing_by_alias: dict[str, dict] = {}
+    for model_key, model_config in payload["models"].items():
+        if not isinstance(model_config, dict):
+            continue
+        pricing = model_config.get("pricing")
+        if not isinstance(pricing, dict):
+            continue
+        calculator = pricing.get("calculator")
+        prices = pricing.get("prices")
+        if not isinstance(calculator, str) or not isinstance(prices, dict):
+            continue
+        pricing_spec = {
+            "calculator": calculator,
+            "prices": {key: float(value) for key, value in prices.items()},
+        }
+        aliases = {
+            _normalize_model_alias(model_key),
+            _normalize_model_alias(model_config.get("model_name")),
+        }
+        for alias in aliases:
+            if not alias:
+                continue
+            existing = pricing_by_alias.get(alias)
+            if existing is not None and existing != pricing_spec:
+                raise ValueError(
+                    f"Conflicting pricing specs for model alias {alias!r} in {config_path}"
+                )
+            pricing_by_alias[alias] = pricing_spec
+    return pricing_by_alias
+
+
+def _model_pricing(
+    model: Any, pricing_by_alias: dict[str, dict], config_path: Path
+) -> dict:
+    alias = _normalize_model_alias(model)
+    pricing = pricing_by_alias.get(alias)
+    if pricing is None:
+        raise ValueError(
+            f"No pricing entry for Langfuse model {model!r}; add it to {config_path}"
+        )
+    return pricing
+
+
+def _token_count(row: pd.Series, column: str) -> int:
+    value = row.get(column, 0)
+    if pd.isna(value):
+        return 0
+    return int(value)
+
+
+def _pricing_response_for_row(row: pd.Series, *, uncached: bool) -> dict[str, Any]:
+    input_uncached = _token_count(row, "input_uncached")
+    input_cached = _token_count(row, "input_cached")
+    output = _token_count(row, "output")
+    prompt_tokens = input_uncached + input_cached
+    prompt_cache_hit_tokens = 0 if uncached else input_cached
+    prompt_cache_miss_tokens = prompt_tokens if uncached else input_uncached
+    return {
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": output,
+            "prompt_cache_hit_tokens": prompt_cache_hit_tokens,
+            "prompt_cache_miss_tokens": prompt_cache_miss_tokens,
+        }
+    }
+
+
+def _priced_usage(row: pd.Series, pricing: dict) -> tuple[float, float]:
+    calculator = resolve_pricing_calculator(pricing["calculator"])
+    as_billed = calculator(
+        pricing["prices"], _pricing_response_for_row(row, uncached=False)
+    )
+    uncached = calculator(
+        pricing["prices"], _pricing_response_for_row(row, uncached=True)
+    )
+    if as_billed is None or uncached is None:
+        raise ValueError(
+            f"Incomplete pricing config for calculator {pricing['calculator']!r}"
+        )
+    return as_billed.total_usd, uncached.total_usd
+
+
+def cost_dollars(
+    lf: pd.DataFrame, *, models_config_path: Path | None = None
+) -> pd.DataFrame:
     """Compute per-system $ as-billed and at uncached-input rates.
 
     `as_billed` honors cache hit pricing.
     `uncached` prices all input tokens at the uncached rate (a robustness frame
     that strips out the cache subsidy — useful for comparing token volume).
     """
-    # Approximate per-system pricing — assume each system's total is dominated by
-    # one provider for input; for mixed systems (C2 family) we split by role/model
-    # so prices map correctly.
+    config_path = Path(models_config_path or DEFAULT_MODELS_CONFIG)
+    pricing_by_alias = _load_model_pricing(config_path)
     rows = []
     for system, grp in lf.groupby("system"):
         as_billed_usd = 0.0
         uncached_usd = 0.0
         runs = int(grp["runs"].iloc[0])
         for _, r in grp.iterrows():
-            m = r["model"].lower()
-            if "deepseek" in m:
-                as_billed_usd += (
-                    r["input_uncached"] / 1e6 * PRICE_DS_INPUT_UNCACHED
-                    + r["input_cached"] / 1e6 * PRICE_DS_INPUT_CACHED
-                    + r["output"] / 1e6 * PRICE_DS_OUTPUT
-                )
-                uncached_usd += (
-                    r["input_uncached"] + r["input_cached"]
-                ) / 1e6 * PRICE_DS_INPUT_UNCACHED + r["output"] / 1e6 * PRICE_DS_OUTPUT
-            elif "qwen" in m:
-                qwen_cost = (
-                    r["input_uncached"] / 1e6 * PRICE_QWEN_INPUT
-                    + r["output"] / 1e6 * PRICE_QWEN_OUTPUT
-                )
-                as_billed_usd += qwen_cost
-                uncached_usd += qwen_cost  # qwen has no cache split in our data
+            row_as_billed, row_uncached = _priced_usage(
+                r, _model_pricing(r["model"], pricing_by_alias, config_path)
+            )
+            as_billed_usd += row_as_billed
+            uncached_usd += row_uncached
         rows.append(
             {
                 "system": system,
